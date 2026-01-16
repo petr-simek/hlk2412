@@ -16,6 +16,7 @@ from .device import HLK2412Device
 PLATFORMS = [
     Platform.BINARY_SENSOR,
     Platform.SENSOR,
+    Platform.BUTTON,
 ]
 
 _LOGGER = logging.getLogger(__name__)
@@ -24,7 +25,7 @@ _LOGGER = logging.getLogger(__name__)
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntryType) -> bool:
     """Set up HLK-2412 from a config entry."""
     assert entry.unique_id is not None
-    
+
     if CONF_ADDRESS not in entry.data and CONF_MAC in entry.data:
         mac = entry.data[CONF_MAC]
         if "-" not in mac:
@@ -52,6 +53,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntryType) -> bool
 
     device = HLK2412Device(ble_device=ble_device)
 
+    retry_count = entry.options.get(CONF_RETRY_COUNT, DEFAULT_RETRY_COUNT)
+
     coordinator = entry.runtime_data = DataCoordinator(
         hass,
         _LOGGER,
@@ -59,8 +62,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntryType) -> bool
         device,
         entry.unique_id,
         entry.title,
+        retry_count,
     )
-    
+
     device_registry = dr.async_get(hass)
     device_registry.async_get_or_create(
         config_entry_id=entry.entry_id,
@@ -70,7 +74,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntryType) -> bool
         model="HLK-LD2412",
         connections={(dr.CONNECTION_BLUETOOTH, address)},
     )
-    
+
     entry.async_on_unload(coordinator.async_start())
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

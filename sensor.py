@@ -70,7 +70,27 @@ SENSOR_TYPES: dict[str, SensorEntityDescription] = {
         device_class=SensorDeviceClass.DURATION,
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
+    "data_mode": SensorEntityDescription(
+        key="data_type",
+        name="Data mode",
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
 }
+
+# Add gate energy sensors for engineering mode (13 gates)
+for gate_num in range(13):
+    SENSOR_TYPES[f"move_gate_{gate_num}"] = SensorEntityDescription(
+        key=f"move_gate_{gate_num}_energy",
+        name=f"Move gate {gate_num} energy",
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+    )
+    SENSOR_TYPES[f"static_gate_{gate_num}"] = SensorEntityDescription(
+        key=f"static_gate_{gate_num}_energy",
+        name=f"Static gate {gate_num} energy",
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+    )
 
 
 async def async_setup_entry(
