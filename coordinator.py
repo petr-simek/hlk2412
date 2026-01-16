@@ -31,7 +31,7 @@ class DataCoordinator:
         base_unique_id: str,
         device_name: str,
         retry_count: int,
-        connect_interval: float = 30.0,
+        connect_interval: float = 5.0,
     ) -> None:
         """Initialize the coordinator."""
         self.hass = hass
@@ -82,10 +82,9 @@ class DataCoordinator:
 
         while True:
             try:
-                if not self.device.is_connected:
-                    await self.device.update()
-                    attempt = 0
-                    delay = 1.0
+                await self.device.update()
+                attempt = 0
+                delay = 1.0
             except BLEAK_RETRY_EXCEPTIONS as ex:
                 attempt += 1
                 self.logger.debug("Retryable BLE error: %s", ex)
