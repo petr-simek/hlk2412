@@ -1,0 +1,60 @@
+{
+  "config": {
+    "step": {
+      "confirm": {
+        "description": "Do you want to add the HLK-2412 device {name}?"
+      },
+      "user": {
+        "data": {
+          "address": "Device"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "Device is already configured",
+      "no_devices_found": "No HLK-2412 devices found"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "move_distance": {
+        "name": "Moving distance"
+      },
+      "still_distance": {
+        "name": "Still distance"
+      },
+      "move_energy": {
+        "name": "Moving energy"
+      },
+      "still_energy": {
+        "name": "Still energy"
+      },
+      "detect_distance": {
+        "name": "Detection distance"
+      },
+      "firmware_version": {
+        "name": "Firmware version"
+      },
+      "min_gate": {
+        "name": "Minimum gate"
+      },
+      "max_gate": {
+        "name": "Maximum gate"
+      },
+      "unmanned_duration": {
+        "name": "Unmanned duration"
+      }
+    },
+    "binary_sensor": {
+      "occupancy": {
+        "name": "Occupancy"
+      },
+      "moving": {
+        "name": "Motion"
+      },
+      "stationary": {
+        "name": "Static"
+      }
+    }
+  }
+}

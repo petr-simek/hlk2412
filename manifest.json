@@ -1,0 +1,17 @@
+{
+  "domain": "hlk2412",
+  "name": "HLK-2412",
+  "bluetooth": [
+    {
+      "local_name": "HLK-LD2412*"
+    }
+  ],
+  "codeowners": [],
+  "config_flow": true,
+  "dependencies": ["bluetooth_adapters"],
+  "documentation": "https://github.com/yourusername/hlk2412",
+  "iot_class": "local_push",
+  "loggers": ["hlk2412"],
+  "requirements": ["bleak-retry-connector>=3.5.0"],
+  "version": "0.1"
+}

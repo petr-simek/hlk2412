@@ -1,0 +1,465 @@
+2. Čtení základních parametrů (to, co tě zajímá)
+LD2410 – všechno v jednom příkazu
+
+Jeden read command (0x0061) vrátí:
+
+max moving gate
+
+max static gate
+
+motion sensitivity pro všechny gate
+
+static sensitivity pro všechny gate
+
+unmanned duration
+
+➡️ Jednodušší, ale méně flexibilní
+
+HLK-LD2410 Serial Communication…
+
+LD2412 – rozdělené, jemnější řízení
+
+Samostatné read příkazy:
+
+0x0011 – rozlišení gate
+
+0x0012 – min/max gate + unmanned duration
+
+0x0013 – motion sensitivity (14 bytů)
+
+0x0014 – motionless sensitivity (14 bytů)
+
+0x001C – light-sense config
+
+0x00A0 – FW verze
+
+0x00A5 – MAC adresa
+
+➡️ Více dotazů, ale lepší granularita
+
+HLK-LD2412 Serial Communication…
+
+3. Rozdíly v reportovaných datech (runtime čtení)
+Společné
+
+Frame header: F4 F3 F2 F1
+
+Typ dat:
+
+0x02 = basic target data
+
+0x01 = engineering mode
+
+LD2410
+
+Basic data:
+
+target state
+
+motion distance
+
+motion energy
+
+static distance
+
+static energy
+
+Engineering:
+
+energie gate 0–8 (motion + static)
+
+LD2412
+
+Basic data:
+
+stejné jako LD2410
+
+Navíc:
+
+víc gate (až 14)
+
+světelný senzor
+
+lepší definice frame (revize 2024)
+
+Engineering:
+
+energie gate 0–14
+
+0) Spolecne zaklady (pro oba moduly)
+Endianness
+
+Vsechny vicbytove hodnoty v ramci UART protokolu jsou little-endian (LSB first).
+
+Dva typy komunikace
+
+Command/ACK (konfiguracni ramce) – zacina FD FC FB FA, konci 04 03 02 01
+
+Data report (prubezne vystupy) – zacina F4 F3 F2 F1, konci F8 F7 F6 F5
+
+1) Command/ACK frame (konfiguracni kanal)
+1.1 Format “Send command”
+
+Header: FD FC FB FA
+Length: 2B LE = delka “intra-frame data”
+Intra-frame:
+
+command_word (2B LE)
+
+command_value (N B)
+Tail: 04 03 02 01
+
+Tohle je stejne u LD2410 i LD2412.
+
+Parser pro command frame
+
+Sync na FD FC FB FA
+
+Precist len = u16_le
+
+Precist presne len bajtu intra-data
+
+Overit tail 04 03 02 01
+
+V intra-datech prvni 2B jsou cmd
+
+1.2 Format “ACK”
+
+ACK ma stejne header/tail + length, ale intra-frame zacina:
+
+sent_cmd_word | 0x0100 (2B LE)
+
+pak return_value (N B)
+
+V dokumentech je to popsane jako “Send command word | 0x0100”.
+
+Co je ACK status
+
+Ve vetsine odpovedi je hned na zacatku return_value:
+
+status = 2B LE (0 = ok, 1 = fail)
+
+2) DULEZITE: “Enable configuration” gate (nutne i kdyz jen ctes)
+
+Aby modul provedl jakykoliv dalsi command, musis nejdriv poslat:
+
+Enable config
+
+cmd: 0x00FF
+
+value: 0x0001
+
+ACK vraci status + protocol ver + dalsi pole (LD2410 ma buffer size, LD2412 ma v textu “protocol version” a dalsi 2B).
+
+End config
+
+cmd: 0x00FE
+
+value: none
+
+ACK vraci status.
+
+Read-only sekvence (doporuzeni)
+
+Vzdy:
+
+Send Enable config (00FF)
+
+Posli 1..N read prikazu
+
+Send End config (00FE)
+
+Jinak ti nektere moduly prikazy ignoruji.
+
+3) Data report frame (prubezne vystupy)
+3.1 Format reportu (oba)
+
+Header: F4 F3 F2 F1
+Length: 2B LE
+Intra-frame:
+
+data_type (1B) => 0x02 basic, 0x01 engineering
+
+0xAA (1B) (fixed head byte)
+
+target_payload (variabilni dle type)
+
+0x55 (1B) (tail marker)
+
+0x00 (1B) (check byte – v protokolu uvedeno jako 0x00)
+End-of-frame: F8 F7 F6 F5
+
+Parser pro report frame
+
+Sync na F4 F3 F2 F1
+
+Precist len = u16_le
+
+Precist presne len bajtu intra-data
+
+Overit end-of-frame F8 F7 F6 F5
+
+V intra: type = b0, must_be_AA = b1, pak payload
+
+4) “Target basic information” payload (type = 0x02)
+4.1 LD2412 basic payload (jasne definovane)
+
+V tabulce ma:
+
+target_state (1B)
+
+moving_distance_cm (2B LE)
+
+moving_energy (1B)
+
+stationary_distance_cm (2B LE)
+
+stationary_energy (1B)
+
+Tohle je dohromady 1 + 2 + 1 + 2 + 1 = 7 bajtu payloadu (za AA).
+
+HLK-LD2412 Serial Communication…
+
+target_state:
+
+0x00 none
+
+0x01 moving
+
+0x02 stationary
+
+0x03 both
+
+HLK-LD2412 Serial Communication…
+
+Minimalni parse (LD2412, type 0x02)
+
+Po type(1) + AA(1):
+
+read 7 bytes podle vyse
+Pak cekej 0x55 0x00
+
+4.2 LD2410 basic payload (pozor: dokument ma divnou tabulku)
+
+LD2410 text rika, ze output zahrnuje motion/static distance & energy.
+
+HLK-LD2410 Serial Communication…
+
+
+Ale v Table 11 na strane “target data frame composition” jsou v pdf nekonzistence (opakovana “Stationary target distance” a pak “Detection distance” apod).
+
+HLK-LD2410 Serial Communication…
+
+Spolehlive se da jit podle prikladoveho frame:
+
+Normal working mode example:
+... length 0D 00 02 AA 02 51 00 00 00 00 3B 00 00 55 00 ...
+
+HLK-LD2410 Serial Communication…
+
+Z toho jde videt:
+
+po 02 AA nasleduje payload delky 0D - 2 (type+AA) - 2 (55 00) = 9 bajtu.
+
+Takze LD2410 basic payload je v praxi delsi nez LD2412 (7B), typicky 9B (podle toho example).
+
+HLK-LD2410 Serial Communication…
+
+Robustni strategie pro LD2410 basic
+
+Nehardcoduj pole z tabulky.
+
+Vezmi payload jako “blob” o delce (len - 1(type) - 1(AA) - 2(55 00))
+
+Pokud chces konkretni pole, zorientuj se empiricky:
+
+state je prvni bajt po AA (v example je 02)
+
+nasleduji LE vzdalenosti a 1B energie, ale dokument je nekonzistentni, takze realny moduly se muzou lisit FW verzi.
+
+Pokud chces, muzu ti z toho example rozebrat byte-by-byte a navrhnout konkretni mapu, ale u LD2410 tohle fakt zalezi na FW.
+
+5) Engineering mode payload (type = 0x01)
+
+U obou plati:
+
+engineering mode pridava energie pro kazdou gate (moving + static).
+
+Pocet gate:
+
+LD2410 typicky 0..8
+
+LD2412 0..N kde N muze byt az 14 a navic umi menit “resolution”.
+
+Doporučení
+
+Pro normalni aplikaci engineering mode nezapinej (jen debug).
+
+Parser udelej tak, aby engineering payload jen “preskocil” (delka je dana frame length).
+
+6) Read-only command set: LD2412 (konkretne prikazy + co cekat)
+
+Vsechny tyhle prikazy posilej mezi Enable/End config.
+
+HLK-LD2412 Serial Communication…
+
+6.1 Read firmware
+
+cmd 0x00A0, value none
+
+return: status(2) + fw_type(2=0x2412) + major(2) + minor(4)
+
+Priklad v pdf: vraci V1.xx...
+
+HLK-LD2412 Serial Communication…
+
+6.2 Read resolution
+
+cmd 0x0011
+
+return: status(2) + 6B kde prvni je resolution value (0/1/3)
+
+HLK-LD2412 Serial Communication…
+
+6.3 Read basic params (min/max gate + unmanned)
+
+cmd 0x0012
+
+return: status(2) + min_gate(1) + max_gate(1) + unmanned_s(2 LE) + out_polarity(1)
+
+HLK-LD2412 Serial Communication…
+
+6.4 Query motion sensitivity (14 bytů)
+
+cmd 0x0013
+
+return: status(2) + 14B (gate1..gate14 nebo gate0..gate13 podle implementace; dokument rika “each byte corresponds to a distance gate”)
+
+HLK-LD2412 Serial Communication…
+
+6.5 Query motionless sensitivity (14 bytů)
+
+cmd 0x0014
+
+stejna struktura jako 0013
+
+HLK-LD2412 Serial Communication…
+
+6.6 (volitelne) Light-sense config query
+
+cmd 0x001C
+
+return: status(2) + 2B config
+
+HLK-LD2412 Serial Communication…
+
+6.7 (volitelne) MAC address
+
+cmd 0x00A5, value 0x0001
+
+return: status(2) + 6B MAC (big-end order podle textu)
+
+HLK-LD2412 Serial Communication…
+
+7) Read-only command set: LD2410 (konkretne)
+
+Stejne: Enable/End config.
+
+HLK-LD2410 Serial Communication…
+
+7.1 Read firmware
+
+cmd 0x00A0, value none
+
+return: status + fw_type (v doc je 0x0000) + major + minor
+
+HLK-LD2410 Serial Communication…
+
+7.2 Read parameters (vse v jednom)
+
+cmd 0x0061, value none
+
+return: status + 0xAA + max gate + configured max move + configured max static + sensitivities + unmanned
+Dokument popisuje hodne poli v jednom frame.
+
+HLK-LD2410 Serial Communication…
+
+Pozor: v pdf je u “Send data” pro 0x0061 rozbita ukazka (vypada jak kdyby chybely bajty / je spatne zalomena). Na to se nespolehaj, rid se formatem command frame (header+len+cmd+tail).
+
+HLK-LD2410 Serial Communication…
+
+8) Doporučená implementace (prakticky)
+8.1 Jeden parser na oba streamy
+
+Na UARTu ti muzou prijit:
+
+report frames (F4...)
+
+ack frames (FD...)
+
+Udelej state machine:
+
+hledam header (4B)
+
+ctu length (2B LE)
+
+ctu payload (len B)
+
+overim tail/end (4B)
+
+dispatch podle typu:
+
+FD… -> command/ack handler
+
+F4… -> report handler
+
+8.2 Resynchronizace
+
+Kdyz ti nesedi tail:
+
+posun se o 1 bajt vpred a znovu hledej header.
+
+nikdy nepredpokladej, ze stream zacina na hranici frame.
+
+8.3 “Read-only klient” flow
+
+Po startu:
+
+nastavit baudrate spravne (LD2410 default 256000, LD2412 115200)
+
+optionally poslat FW read
+
+Kdyz chces jednorazove nacist konfiguraci:
+
+Enable config
+
+read commands (dle modulu)
+
+End config
+
+Pak uz jen cist report frames.
+
+9) Minimalni “co musis implementovat”, aby to fungovalo
+Pro LD2412
+
+Command/ACK parser
+
+Report parser
+
+Read: 00FF -> (0012, 0011, 0013, 0014, 00A0) -> 00FE
+
+Pro LD2410
+
+Command/ACK parser
+
+Report parser
+
+Read: 00FF -> (0061, 00A0) -> 00FE
+
+Pokud mi reknes v jakem jazyce to chces napsat (C na attiny/arduino, ESPHome lambda, Python, Java), tak ti rovnou dam konkretni kod:
+
+frame parser (ring buffer + state machine)
+
+builders na read-only prikazy
+
+dekodery ACK a reportu (LD2412 presne, LD2410 “best effort” podle length)
