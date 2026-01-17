@@ -8,6 +8,7 @@ from homeassistant.components.binary_sensor import (
     BinarySensorEntityDescription,
 )
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .coordinator import ConfigEntryType
@@ -28,6 +29,12 @@ BINARY_SENSOR_TYPES: dict[str, BinarySensorEntityDescription] = {
         key="stationary",
         name="Static",
         device_class=BinarySensorDeviceClass.OCCUPANCY,
+    ),
+    "calibration_active": BinarySensorEntityDescription(
+        key="calibration_active",
+        name="Calibration active",
+        device_class=BinarySensorDeviceClass.RUNNING,
+        entity_category=EntityCategory.DIAGNOSTIC,
     ),
 }
 

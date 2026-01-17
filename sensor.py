@@ -63,17 +63,17 @@ SENSOR_TYPES: dict[str, SensorEntityDescription] = {
         name="Maximum gate",
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
-    "unmanned_duration": SensorEntityDescription(
-        key="unmanned_duration",
-        name="Unmanned duration",
-        native_unit_of_measurement=UnitOfTime.SECONDS,
-        device_class=SensorDeviceClass.DURATION,
-        entity_category=EntityCategory.DIAGNOSTIC,
-    ),
     "data_mode": SensorEntityDescription(
         key="data_type",
         name="Data mode",
         entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    "light_level": SensorEntityDescription(
+        key="light_level",
+        name="Light level",
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        suggested_display_precision=0,
     ),
 }
 

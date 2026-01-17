@@ -17,6 +17,8 @@ PLATFORMS = [
     Platform.BINARY_SENSOR,
     Platform.SENSOR,
     Platform.BUTTON,
+    Platform.NUMBER,
+    Platform.SELECT,
 ]
 
 _LOGGER = logging.getLogger(__name__)
