@@ -835,20 +835,20 @@ class HLK2412Device:
         }
 
         # Parse gate energies in engineering mode
-        # Structure: 7 basic + 2 max gates + 13 move gates + 13 static gates
-        if frame_type == UPLINK_TYPE_ENGINEERING and len(content) >= 35:
+        # Structure: 7 basic + 2 max gates + 14 move gates + 14 static gates
+        if frame_type == UPLINK_TYPE_ENGINEERING and len(content) >= 37:
             # Skip basic 7 bytes and 2 max gate bytes
             gate_data = content[9:]
             
             # 13 movement gate energies
-            if len(gate_data) >= 13:
-                for i in range(13):
+            if len(gate_data) >= 14:
+                for i in range(14):
                     result[f"move_gate_{i}_energy"] = gate_data[i]
             
             # 13 static gate energies (after movement gates)
-            if len(gate_data) >= 26:
-                for i in range(13):
-                    result[f"static_gate_{i}_energy"] = gate_data[13 + i]
+            if len(gate_data) >= 28:
+                for i in range(14):
+                    result[f"static_gate_{i}_energy"] = gate_data[14 + i]
             
             # Light level (1 byte after gate energies, 0-255)
             if len(data) >= 39:
@@ -858,7 +858,7 @@ class HLK2412Device:
             # _LOGGER.debug("Engineering mode: parsed %d gate energies", len([k for k in result if "gate" in k]))
         else:
             # In basic mode, set all gate energies to None (unavailable)
-            for i in range(13):
+            for i in range(14):
                 result[f"move_gate_{i}_energy"] = None
                 result[f"static_gate_{i}_energy"] = None
 

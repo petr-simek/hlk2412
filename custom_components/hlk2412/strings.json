@@ -29,9 +29,6 @@
       "still_energy": {
         "name": "Still energy"
       },
-      "detect_distance": {
-        "name": "Detection distance"
-      },
       "firmware_version": {
         "name": "Firmware version"
       },

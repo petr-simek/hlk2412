@@ -14,26 +14,31 @@ BUTTON_TYPES: dict[str, ButtonEntityDescription] = {
     "toggle_engineering": ButtonEntityDescription(
         key="toggle_engineering",
         name="Toggle engineering mode",
+        icon="mdi:tune",
         entity_category=EntityCategory.CONFIG,
     ),
     "start_calibration": ButtonEntityDescription(
         key="start_calibration",
         name="Start background calibration",
+        icon="mdi:target",
         entity_category=EntityCategory.CONFIG,
     ),
     "restart_module": ButtonEntityDescription(
         key="restart_module",
         name="Restart module",
+        icon="mdi:restart",
         entity_category=EntityCategory.CONFIG,
     ),
     "factory_reset": ButtonEntityDescription(
         key="factory_reset",
         name="Factory reset",
+        icon="mdi:factory",
         entity_category=EntityCategory.CONFIG,
     ),
     "apply_config": ButtonEntityDescription(
         key="apply_config",
         name="Apply configuration",
+        icon="mdi:content-save",
         entity_category=EntityCategory.CONFIG,
     ),
 }
@@ -83,7 +88,7 @@ class HLK2412Button(HLK2412Entity, ButtonEntity):
             device = self.coordinator.device
             
             # Write basic parameters
-            min_gate = device.data.get("min_gate", 0)
+            min_gate = device.data.get("min_gate", 1)
             max_gate = device.data.get("max_gate", 13)
             unmanned_duration = device.data.get("unmanned_duration", 5)
             out_pin_polarity = device.data.get("out_pin_polarity", 0)

@@ -14,6 +14,7 @@ SELECT_TYPES: dict[str, SelectEntityDescription] = {
     "out_pin_polarity": SelectEntityDescription(
         key="out_pin_polarity",
         name="Out pin polarity",
+        icon="mdi:electric-switch",
         options=["High when occupied", "Low when occupied"],
         entity_category=EntityCategory.CONFIG,
     ),

@@ -18,21 +18,25 @@ BINARY_SENSOR_TYPES: dict[str, BinarySensorEntityDescription] = {
     "occupancy": BinarySensorEntityDescription(
         key="occupancy",
         name="Occupancy",
+        icon="mdi:motion-sensor",
         device_class=BinarySensorDeviceClass.OCCUPANCY,
     ),
     "motion": BinarySensorEntityDescription(
         key="moving",
         name="Motion",
+        icon="mdi:run",
         device_class=BinarySensorDeviceClass.MOVING,
     ),
     "static": BinarySensorEntityDescription(
         key="stationary",
         name="Static",
+        icon="mdi:human",
         device_class=BinarySensorDeviceClass.OCCUPANCY,
     ),
     "calibration_active": BinarySensorEntityDescription(
         key="calibration_active",
         name="Calibration active",
+        icon="mdi:target",
         device_class=BinarySensorDeviceClass.RUNNING,
         entity_category=EntityCategory.DIAGNOSTIC,
     ),

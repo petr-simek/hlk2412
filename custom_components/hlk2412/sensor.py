@@ -20,6 +20,7 @@ SENSOR_TYPES: dict[str, SensorEntityDescription] = {
     "move_distance": SensorEntityDescription(
         key="move_distance_cm",
         name="Moving distance",
+        icon="mdi:arrow-expand-horizontal",
         native_unit_of_measurement=UnitOfLength.CENTIMETERS,
         device_class=SensorDeviceClass.DISTANCE,
         state_class=SensorStateClass.MEASUREMENT,
@@ -27,6 +28,7 @@ SENSOR_TYPES: dict[str, SensorEntityDescription] = {
     "still_distance": SensorEntityDescription(
         key="still_distance_cm",
         name="Still distance",
+        icon="mdi:ruler",
         native_unit_of_measurement=UnitOfLength.CENTIMETERS,
         device_class=SensorDeviceClass.DISTANCE,
         state_class=SensorStateClass.MEASUREMENT,
@@ -34,43 +36,43 @@ SENSOR_TYPES: dict[str, SensorEntityDescription] = {
     "move_energy": SensorEntityDescription(
         key="move_energy",
         name="Moving energy",
+        icon="mdi:lightning-bolt",
         state_class=SensorStateClass.MEASUREMENT,
     ),
     "still_energy": SensorEntityDescription(
         key="still_energy",
         name="Still energy",
-        state_class=SensorStateClass.MEASUREMENT,
-    ),
-    "detect_distance": SensorEntityDescription(
-        key="detect_distance_cm",
-        name="Detect distance",
-        native_unit_of_measurement=UnitOfLength.CENTIMETERS,
-        device_class=SensorDeviceClass.DISTANCE,
+        icon="mdi:battery",
         state_class=SensorStateClass.MEASUREMENT,
     ),
     "firmware_version": SensorEntityDescription(
         key="firmware_version",
         name="Firmware version",
+        icon="mdi:chip",
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
     "min_gate": SensorEntityDescription(
         key="min_gate",
         name="Minimum gate",
+        icon="mdi:gate-arrow-right",
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
     "max_gate": SensorEntityDescription(
         key="max_gate",
         name="Maximum gate",
+        icon="mdi:gate-arrow-right",
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
     "data_mode": SensorEntityDescription(
         key="data_type",
         name="Data mode",
+        icon="mdi:view-dashboard",
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
     "light_level": SensorEntityDescription(
         key="light_level",
         name="Light level",
+        icon="mdi:brightness-7",
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
         suggested_display_precision=0,
@@ -78,16 +80,18 @@ SENSOR_TYPES: dict[str, SensorEntityDescription] = {
 }
 
 # Add gate energy sensors for engineering mode (13 gates)
-for gate_num in range(13):
+for gate_num in range(14):
     SENSOR_TYPES[f"move_gate_{gate_num}"] = SensorEntityDescription(
         key=f"move_gate_{gate_num}_energy",
         name=f"Move gate {gate_num} energy",
+        icon="mdi:pulse",
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
     )
     SENSOR_TYPES[f"static_gate_{gate_num}"] = SensorEntityDescription(
         key=f"static_gate_{gate_num}_energy",
         name=f"Static gate {gate_num} energy",
+        icon="mdi:signal-variant",
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
     )
