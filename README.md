@@ -1,116 +1,119 @@
 # HLK-2412 for Home Assistant
 
-Integrace pro **HLK-2412** Bluetooth Low Energy (BLE) mmWave radarové senzory s plnou podporou UART protokolu.
+> ⚠️ **Work in Progress** - This integration is actively being developed. Some features may be incomplete or subject to change.
 
-## Vlastnosti
+Integration for **HLK-2412** Bluetooth Low Energy (BLE) mmWave radar sensors with full UART protocol support.
 
-- **Detekce pohybu a přítomnosti v reálném čase** pomocí mmWave radaru
-- **UART Command Protocol** - komunikace přes Bluetooth s podporou příkazů
-- **Engineering Mode** - automatické zapnutí režimu s detailními daty
-- **Měření vzdálenosti** pro pohybující se a statické cíle
-- **Měření energie detekce** pro analýzu kvality signálu
-- **Automatické přepojení** při výpadku spojení
+## Features
 
-## Implementace
+- **Real-time motion and presence detection** using mmWave radar
+- **UART Command Protocol** - Bluetooth communication with command support
+- **Engineering Mode** - toggle between basic and engineering mode
+- **Distance measurement** for moving and static targets (cm)
+- **Detection energy measurement** for each gate (0-255)
+- **26 gate energy sensors** - 13 for motion + 13 for static detection
+- **Light level sensor** - ambient light level (0-255) in engineering mode
+- **Device configuration** - configure gates, sensitivity, polarity
+- **Background calibration** - dynamic detection calibration
+- **Factory reset** - restore factory settings
+- **Automatic reconnection** on connection loss
 
-Integrace je postavena na **HLK-LD2412** UART protokolu (podobný LD2410, ale s rozdíly):
-- **Frame Header**: `FDFCFBFA` (TX), `F4F3F2F1` (RX)
-- **Frame Footer**: `04030201` (TX), `F8F7F6F5` (RX)
-- **Command Codes** (LD2412 specifické):
-  - Enable Config: `0x00FF`
-  - End Config: `0x00FE`
-  - Read Firmware: `0x00A0`
-  - Read Basic Params: `0x0012`
-- **Data Payload**: 7 bytes (target_state + distances + energies)
-- **Bluetooth Characteristics**:
-  - Notify: `0000fff1-0000-1000-8000-00805f9b34fb`
-  - Write: `0000fff2-0000-1000-8000-00805f9b34fb`
+## Entity
 
-## Entity (Binary Sensors)
+### Binary Sensors
 
-🏠 **Occupancy** – celková přítomnost kombinující pohyb a statická data  
-🏃 **Motion** – zapíná se při detekci pohybu  
-🧍 **Static** – indikuje statickou přítomnost
+🏠 **Occupancy** – overall presence combining motion and static data  
+🏃 **Motion** – turns on when motion is detected  
+🧍 **Static** – indicates static presence  
+🔄 **Calibration active** – indicates ongoing background calibration
 
-## Entity (Sensors)
+### Sensors
 
-### Runtime Data
-📏 **Moving distance** – vzdálenost k nejbližšímu pohybujícímu se cíli (cm)  
-📍 **Still distance** – vzdálenost k nejbližšímu statickému cíli (cm)  
-⚡ **Moving energy** – úroveň energie pohybujícího se cíle  
-🔋 **Still energy** – úroveň energie statického cíle  
-📏 **Detection distance** – vzdálenost detekce (cm)
+#### Runtime Data
+📏 **Moving distance** – distance to nearest moving target (cm)  
+📍 **Still distance** – distance to nearest static target (cm)  
+⚡ **Moving energy** – energy level of moving target  
+🔋 **Still energy** – energy level of static target  
+📏 **Detection distance** – detection distance (cm)  
+💡 **Light level** – ambient light level 0-255 (engineering mode only)
 
-### Diagnostic (Configuration)
-🔧 **Firmware version** – verze firmware zařízení  
-🚪 **Minimum gate** – minimální detekční brána  
-🚪 **Maximum gate** – maximální detekční brána  
-⏱️ **Unmanned duration** – doba do přepnutí na "unmanned" (sekundy)
+#### Engineering Mode - Gate Energies (0-13)
+📊 **Move gate 0-13 energy** – motion energy for each gate (0-255)  
+📊 **Static gate 0-13 energy** – static detection energy for each gate (0-255)
 
-## Instalace
+#### Diagnostic
+🔧 **Firmware version** – device firmware version  
+🚪 **Minimum gate** – minimum detection gate  
+🚪 **Maximum gate** – maximum detection gate  
+📊 **Data mode** – current mode (Basic/Engineering)
+
+### Buttons
+
+🔘 **Toggle engineering mode** – switch between basic and engineering mode  
+🔘 **Start background calibration** – start dynamic background calibration (~10s)  
+🔘 **Restart module** – restart the module  
+🔘 **Factory reset** – restore factory settings and restart module  
+🔘 **Apply configuration** – write all settings to device
+
+### Number Entities (Configuration)
+
+📏 **Minimum gate** (0-13) – minimum gate for detection  
+📏 **Maximum gate** (0-13) – maximum gate for detection  
+⏱️ **Unmanned duration** (0-65535s) – time before switching to "unmanned"  
+📊 **Motion sensitivity gate 0-13** (0-255) – motion sensitivity for each gate  
+📊 **Motionless sensitivity gate 0-13** (0-255) – static detection sensitivity for each gate
+
+
+## Installation
+
+### HACS (recommended)
+
+1. Open HACS in Home Assistant
+2. Click on **Integrations**
+3. Click the **⋮** button in the top right corner
+4. Select **Custom repositories**
+5. Enter URL: `https://github.com/petr-simek/hlk2412`
+6. Category: **Integration**
+7. Click **Add**
+8. Search for "HLK-2412 mmWave Radar" and click **Download**
+9. Restart Home Assistant
+
+### Manual Installation
 
 ```bash
-# Zkopírujte složku do custom_components
-cp -r hlk2412 /path/to/homeassistant/config/custom_components/
+# Copy the folder to custom_components
+cp -r custom_components/hlk2412 /path/to/homeassistant/config/custom_components/
 
-# Restartujte Home Assistant
+# Restart Home Assistant
 ```
 
-### Krok za krokem:
+### After Installation:
 
-1. Zkopírujte složku `hlk2412` do `config/custom_components/`
-2. Restartujte Home Assistant
-3. Přejděte na **Nastavení → Zařízení a služby**
-4. Zařízení by mělo být **automaticky objeveno**
-5. Nebo klikněte na **Přidat integraci** a vyhledejte "HLK-2412"
+1. Go to **Settings → Devices & Services**
+2. Device should be **automatically discovered** via Bluetooth
+3. Or click **Add Integration** and search for "HLK-2412"
+4. Select device from the list and complete configuration
 
-## Technické detaily
+## Technical Details
 
-### UART Command Protocol
+The integration is based on **HLK-LD2412** UART protocol over Bluetooth:
+- Frame headers: `FDFCFBFA` (TX), `F4F3F2F1` (RX)
+- Frame footers: `04030201` (TX), `F8F7F6F5` (RX)
+- Supports both basic (0x02) and engineering (0x01) data modes
+- Automatic connection management with 8.5s disconnect timer
+- Command timeout: 5s for UART commands
 
-Integrace používá **LD2412** UART příkazy přes Bluetooth:
+## Troubleshooting
 
-```python
-# Command sekvence pro read-only operace
-CMD_ENABLE_CFG = "00FF"      # 0x00FF - Zapnout konfigurační režim
-CMD_READ_FIRMWARE = "00A0"   # 0x00A0 - Přečíst firmware verzi
-CMD_READ_BASIC_PARAMS = "0012"  # 0x0012 - Min/max gate + unmanned duration
-CMD_END_CFG = "00FE"         # 0x00FE - Ukončit konfigurační režim
-```
+### Device Won't Connect
+- Check that device is within Bluetooth range
+- Make sure it's not connected to another device
+- Restart Home Assistant
 
-**Poznámka**: LD2412 nepoužívá engineering mode command jako LD2410. Data přijímá automaticky v basic mode (type 0x02).
-
-### Parsování dat (LD2412 Basic Payload - 7 bytů)
-
-Data jsou přijímána v uplink framech typu 0x02 (basic target data):
-
-```python
-# Po F4 F3 F2 F1 (header) + length + 0x02 (type) + 0xAA:
-target_state (1B)           # 0x00=none, 0x01=moving, 0x02=stationary, 0x03=both
-moving_distance_cm (2B LE)  # Vzdálenost pohybujícího se cíle
-moving_energy (1B)          # Energie pohybu
-stationary_distance_cm (2B LE)  # Vzdálenost statického cíle
-stationary_energy (1B)      # Energie statického cíle
-# Footer: 0x55 0x00 + F8 F7 F6 F5
-```
-
-### Connection Management
-
-- **Automatické přepojení** při ztrátě spojení
-- **Disconnect Timer**: 8.5s pro úsporu baterie
-- **Command Timeout**: 5s pro UART příkazy
-
-## Řešení problémů
-
-### Zařízení se nepřipojí
-- Zkontrolujte, že je zařízení v dosahu Bluetooth
-- Ujistěte se, že není připojeno k jinému zařízení
-- Restartujte Home Assistant
-
-### Žádná data
-- Integrace automaticky povoluje Engineering Mode
-- Zkontrolujte logy: `config/home-assistant.log`
-- Povolte debug logging:
+### No Data
+- Integration automatically enables Engineering Mode
+- Check logs: `config/home-assistant.log`
+- Enable debug logging:
 
 ```yaml
 logger:
@@ -119,15 +122,21 @@ logger:
     custom_components.hlk2412: debug
 ```
 
-### Pomalá odezva
-- Použijte [ESPHome Bluetooth Proxy](https://esphome.io/components/bluetooth_proxy.html)
-- Přesuňte proxy blíž k senzoru
+### Slow Response
+- Use [ESPHome Bluetooth Proxy](https://esphome.io/components/bluetooth_proxy.html)
+- Move proxy closer to sensor
 
-## Poznámky
+## Device Configuration
 
-- Integrace je **read-only** - nepodporuje změnu nastavení zařízení
-- Založeno na LD2410 protokolu a struktuře
-- Vyžaduje `bleak-retry-connector>=3.5.0`
+The integration allows complete device configuration:
+
+1. **Change values** in number/select entities as needed
+2. **Click "Apply configuration"** - writes all settings at once:
+   - Basic parameters (min/max gate, unmanned duration, polarity)
+   - Motion sensitivity for all 14 gates
+   - Motionless sensitivity for all 14 gates
+
+Settings are stored in the device and preserved after restart.
 
 ## Dependencies
 
@@ -135,9 +144,9 @@ logger:
 - `homeassistant.components.bluetooth_adapters`
 - `bleak-retry-connector>=3.5.0`
 
-## Doporučené nastavení
+## Recommended Setup
 
-Pro nejlepší výsledky:
-- Použijte [ESPHome Bluetooth Proxy](https://esphome.io/components/bluetooth_proxy.html)
-- Umístěte proxy max 10m od senzoru
-- Vyhněte se překážkám mezi proxy a senzorem
+For best results:
+- Use [ESPHome Bluetooth Proxy](https://esphome.io/components/bluetooth_proxy.html)
+- Place proxy within 10m of sensor
+- Avoid obstacles between proxy and sensor

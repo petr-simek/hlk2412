@@ -1,0 +1,6 @@
+{
+  "name": "HLK-2412 mmWave Radar",
+  "country": ["CZ", "SK"],
+  "render_readme": true,
+  "domains": ["binary_sensor", "sensor", "button", "number", "select"]
+}
