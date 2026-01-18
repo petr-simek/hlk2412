@@ -1,5 +1,5 @@
 {
   "name": "HLK-2412 mmWave Radar",
   "render_readme": true,
-  "domains": ["binary_sensor", "sensor", "button", "number", "select"]
+  "homeassistant": "2024.1.0"
 }
