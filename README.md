@@ -52,7 +52,7 @@ Integration for **HLK-2412** Bluetooth Low Energy (BLE) mmWave radar sensors wit
 🔘 **Toggle engineering mode** – switch between basic and engineering mode  
 🔘 **Start background calibration** – start dynamic background calibration (~10s)  
 🔘 **Restart module** – restart the module  
-🔘 **Factory reset** – restore factory settings and restart module  
+🔘 **Factory reset** – restore factory settings and restart module ⚠️ *not fully functional yet*  
 🔘 **Apply configuration** – write all settings to device
 
 ### Number Entities (Configuration)
@@ -150,3 +150,201 @@ For best results:
 - Use [ESPHome Bluetooth Proxy](https://esphome.io/components/bluetooth_proxy.html)
 - Place proxy within 10m of sensor
 - Avoid obstacles between proxy and sensor
+
+## Visualization
+
+For advanced energy visualization and gate tuning, you can use these custom Lovelace cards:
+
+### Required Cards
+
+1. **[Decluttering Card](https://github.com/custom-cards/decluttering-card)** - for reusable card templates
+2. **[Plotly Graph Card](https://github.com/dbuezas/lovelace-plotly-graph-card)** - for interactive energy plots
+
+### Energy Plot Template
+
+Add this template to your dashboard configuration (edit in YAML mode):
+
+```yaml
+decluttering_templates:
+  ld24xx_energy_plot:
+    card:
+      type: custom:plotly-graph
+      raw_plotly_config: true
+      title: |
+        $ex {
+          const dev = '[[dev]]';
+          const mode = '[[mode]]'; 
+
+          const s = hass.states[`sensor.${dev}_maximum_gate`]; 
+          if (!s) return dev;
+
+          const prefix = mode === 'static'
+            ? 'Static Energy'
+            : 'Movement Energy';
+          
+          const name = s.attributes.friendly_name
+              .replace(/ motion$/i, '')
+              .replace(/HLK-2412_/i, '')
+              .replace(/ maximum gate$/i, '');
+
+          return `${prefix} - ${name}`;
+        }
+      refresh_interval: 1
+      layout:
+        height: 350
+        margin:
+          l: 50
+          r: 50
+          t: 50
+          b: 50
+        showlegend: true
+        legend:
+          x: 0.3
+          'y': -0.3
+        xaxis:
+          dtick: 1
+          type: number
+          fixedrange: true
+          range:
+            - 0
+            - 13
+        yaxis:
+          dtick: 10
+          fixedrange: false
+          range: |
+            $ex {
+              const dev = '[[dev]]';
+              const mode = '[[mode]]';
+              const gates = 14;
+              const vals = [];
+              for (let i=0;i<gates;i++){
+                const energyId = mode === 'static'
+                  ? `sensor.${dev}_static_gate_${i}_energy` 
+                  : `sensor.${dev}_move_gate_${i}_energy`;
+                const thrId = mode === 'static'
+                  ? `number.${dev}_motionless_sensitivity_gate_${i}` 
+                  : `number.${dev}_motion_sensitivity_gate_${i}`;
+
+                const en = hass.states[energyId];
+                const th = hass.states[thrId];
+                if (en) vals.push(Number(en.state));
+                if (th) vals.push(Number(th.state));
+              }
+              const max = Math.max(...vals.filter(v => Number.isFinite(v)), 1);
+              return [0, Math.ceil(max*1.15)];
+            }
+      entities:
+        - entity: ''
+          x: |
+            $ex {
+              const dev = '[[dev]]';
+              const g = hass.states[`sensor.${dev}_maximum_gate`];
+              const v = g ? Number(g.state) - 1 : 0;
+              return [v, v];
+            }
+          'y':
+            - 0
+            - 999
+          showlegend: false
+          line:
+            dash: dot
+            width: 1
+            color: green
+        - entity: ''
+          x: |
+            $ex {
+              const dev = '[[dev]]';
+              const g = hass.states[`sensor.${dev}_minimum_gate`];
+              const v = g ? Number(g.state) - 1 : 0;
+              return [v, v];
+            }
+          'y':
+            - 0
+            - 999
+          showlegend: false
+          line:
+            dash: dot
+            width: 1
+            color: green
+        - entity: ''
+          name: Threshold
+          mode: lines
+          showlegend: false
+          line:
+            shape: spline
+            width: 5
+            color: FB239F
+          x: |
+            $ex Array.from({length: 14}, (_, i) => i)
+          'y': |
+            $ex {
+              const dev = '[[dev]]';
+              const mode = '[[mode]]';
+              return Array.from({length: 14}, (_, i) => {
+                const id = mode === 'static'
+                  ? `number.${dev}_motionless_sensitivity_gate_${i}` 
+                  : `number.${dev}_motion_sensitivity_gate_${i}`;
+                const s = hass.states[id];
+                const v = s ? Number(s.state) : null;
+                return Number.isFinite(v) ? v : null;
+              });
+            }
+        - entity: ''
+          name: Energy
+          mode: lines
+          showlegend: false
+          line:
+            shape: spline
+            width: 2
+            color: blue
+          x: |
+            $ex Array.from({length: 14}, (_, i) => i)
+          'y': |
+            $ex {
+              const dev = '[[dev]]';
+              const mode = '[[mode]]';
+              return Array.from({length: 14}, (_, i) => {
+                const id = mode === 'static'
+                  ? `sensor.${dev}_static_gate_${i}_energy` 
+                  : `sensor.${dev}_move_gate_${i}_energy`;
+                const s = hass.states[id];
+                const v = s ? Number(s.state) : null;
+                return Number.isFinite(v) ? v : null;
+              });
+            }
+```
+
+### Usage Example
+
+Add to your dashboard:
+
+```yaml
+type: custom:decluttering-card
+template: ld24xx_energy_plot
+variables:
+  - dev: hlk_2412_b73f  # Replace with your device entity ID prefix
+  - mode: move          # Use 'move' for motion or 'static' for stationary detection
+```
+
+Example with both motion and static energy:
+
+```yaml
+type: grid
+cards:
+  - type: custom:decluttering-card
+    template: ld24xx_energy_plot
+    variables:
+      - dev: hlk_2412_b73f
+      - mode: move
+  - type: custom:decluttering-card
+    template: ld24xx_energy_plot
+    variables:
+      - dev: hlk_2412_b73f
+      - mode: static
+```
+
+The plot shows:
+- **Blue line** - current energy levels for each gate
+- **Pink line** - sensitivity threshold for each gate
+- **Green vertical lines** - min/max gate boundaries
+- Interactive graph with zoom and pan capabilities
