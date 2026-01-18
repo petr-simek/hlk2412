@@ -64,7 +64,10 @@ class DataCoordinator:
             bluetooth.BluetoothScanningMode.ACTIVE,
         )
 
-        self._connect_task = self.hass.async_create_task(self._connection_loop())
+        self._connect_task = self.hass.async_create_background_task(
+            self._connection_loop(),
+            name=f"hlk2412-{self.ble_device.address}",
+        )
 
         def _async_stop() -> None:
             if self._connect_task:

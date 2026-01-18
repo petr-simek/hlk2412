@@ -79,7 +79,10 @@ class HLK2412Device:
         self._expected_disconnect = False
         self.loop = asyncio.get_event_loop()
         self._last_full_update: float = -3600
+        self._last_sensor_update: float = 0
         self._calibration_poll_task: asyncio.Task | None = None
+        # Default sensor update interval (seconds)
+        self._data["sensor_update_interval"] = 1.0
 
     @property
     def is_connected(self) -> bool:
@@ -813,56 +816,63 @@ class HLK2412Device:
             return None
 
         status_raw = content[0]
-        move_distance_cm = int.from_bytes(content[1:3], "little")
-        move_energy = content[3]
-        still_distance_cm = int.from_bytes(content[4:6], "little")
-        still_energy = content[6]
-
         moving = status_raw in (0x01, 0x03)
         stationary = status_raw in (0x02, 0x03)
         occupancy = moving or stationary
 
+        # Always update critical realtime data (movement/presence)
         result = {
             "moving": moving,
             "stationary": stationary,
             "occupancy": occupancy,
-            "move_distance_cm": move_distance_cm,
-            "move_energy": move_energy,
-            "still_distance_cm": still_distance_cm,
-            "still_energy": still_energy,
-            "data_type": ftype,
-            "engineering_mode": frame_type == UPLINK_TYPE_ENGINEERING,
         }
 
-        # Parse gate energies in engineering mode
-        # Structure: 7 basic + 2 max gates + 14 move gates + 14 static gates
-        if frame_type == UPLINK_TYPE_ENGINEERING and len(content) >= 37:
-            # Skip basic 7 bytes and 2 max gate bytes
-            gate_data = content[9:]
-            
-            # 13 movement gate energies
-            if len(gate_data) >= 14:
-                for i in range(14):
-                    result[f"move_gate_{i}_energy"] = gate_data[i]
-            
-            # 13 static gate energies (after movement gates)
-            if len(gate_data) >= 28:
-                for i in range(14):
-                    result[f"static_gate_{i}_energy"] = gate_data[14 + i]
-            
-            # Light level (1 byte after gate energies, 0-255)
-            if len(data) >= 39:
-                result["light_level"] = data[39]
-                # _LOGGER.debug("[%s] Light level: %d", self.ble_device.address, data[39])
-            
-            # _LOGGER.debug("Engineering mode: parsed %d gate energies", len([k for k in result if "gate" in k]))
-        else:
-            # In basic mode, set all gate energies to None (unavailable)
-            for i in range(14):
-                result[f"move_gate_{i}_energy"] = None
-                result[f"static_gate_{i}_energy"] = None
+        # Throttle non-critical data updates based on configurable interval
+        current_time = time.monotonic()
+        update_interval = self._data.get("sensor_update_interval", 1.0)
+        should_update_sensors = (current_time - self._last_sensor_update) >= update_interval
 
-        # _LOGGER.debug("[%s] Parsed: moving=%s, stationary=%s, occupancy=%s", self.ble_device.address, moving, stationary, occupancy)
+        if should_update_sensors:
+            self._last_sensor_update = current_time
+            
+            move_distance_cm = int.from_bytes(content[1:3], "little")
+            move_energy = content[3]
+            still_distance_cm = int.from_bytes(content[4:6], "little")
+            still_energy = content[6]
+
+            result.update({
+                "move_distance_cm": move_distance_cm,
+                "move_energy": move_energy,
+                "still_distance_cm": still_distance_cm,
+                "still_energy": still_energy,
+                "data_type": ftype,
+                "engineering_mode": frame_type == UPLINK_TYPE_ENGINEERING,
+            })
+
+            # Parse gate energies in engineering mode
+            # Structure: 7 basic + 2 max gates + 14 move gates + 14 static gates
+            if frame_type == UPLINK_TYPE_ENGINEERING and len(content) >= 37:
+                # Skip basic 7 bytes and 2 max gate bytes
+                gate_data = content[9:]
+                
+                # 14 movement gate energies
+                if len(gate_data) >= 14:
+                    for i in range(14):
+                        result[f"move_gate_{i}_energy"] = gate_data[i]
+                
+                # 14 static gate energies (after movement gates)
+                if len(gate_data) >= 28:
+                    for i in range(14):
+                        result[f"static_gate_{i}_energy"] = gate_data[14 + i]
+                
+                # Light level (1 byte after gate energies, 0-255)
+                if len(data) >= 39:
+                    result["light_level"] = data[39]
+            else:
+                # In basic mode, set all gate energies to None (unavailable)
+                for i in range(14):
+                    result[f"move_gate_{i}_energy"] = None
+                    result[f"static_gate_{i}_energy"] = None
 
         return result
 

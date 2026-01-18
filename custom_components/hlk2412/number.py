@@ -39,6 +39,16 @@ NUMBER_TYPES: dict[str, NumberEntityDescription] = {
         native_unit_of_measurement="s",
         entity_category=EntityCategory.CONFIG,
     ),
+    "sensor_update_interval": NumberEntityDescription(
+        key="sensor_update_interval",
+        name="Sensor update interval",
+        icon="mdi:update",
+        native_min_value=0.1,
+        native_max_value=10.0,
+        native_step=0.1,
+        native_unit_of_measurement="s",
+        entity_category=EntityCategory.CONFIG,
+    ),
 }
 
 # Add motion sensitivity for each of the 14 gates (0-13)

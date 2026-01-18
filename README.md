@@ -60,6 +60,7 @@ Integration for **HLK-2412** Bluetooth Low Energy (BLE) mmWave radar sensors wit
 📏 **Minimum gate** (0-13) – minimum gate for detection  
 📏 **Maximum gate** (0-13) – maximum gate for detection  
 ⏱️ **Unmanned duration** (0-65535s) – time before switching to "unmanned"  
+🔄 **Sensor update interval** (0.1-10s) – throttle interval for distance/energy sensors (motion/presence always real-time)  
 📊 **Motion sensitivity gate 0-13** (0-255) – motion sensitivity for each gate  
 📊 **Motionless sensitivity gate 0-13** (0-255) – static detection sensitivity for each gate
 
