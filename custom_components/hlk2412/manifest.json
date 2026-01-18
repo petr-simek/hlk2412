@@ -15,5 +15,5 @@
   "issue_tracker": "https://github.com/petr-simek/hlk2412/issues",
   "loggers": ["hlk2412"],
   "requirements": ["bleak-retry-connector>=3.5.0"],
-  "version": "1.0.0"
+  "version": "1.0.1"
 }

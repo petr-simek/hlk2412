@@ -46,7 +46,9 @@ class HLK2412ConfigFlow(ConfigFlow, domain=DOMAIN):
         """Handle the bluetooth discovery step."""
         _LOGGER.debug("Discovered bluetooth device: %s", discovery_info.as_dict())
         await self.async_set_unique_id(format_unique_id(discovery_info.address))
-        self._abort_if_unique_id_configured()
+        self._abort_if_unique_id_configured(
+            updates={CONF_ADDRESS: discovery_info.address}
+        )
         
         self._discovered_device = discovery_info
         return await self.async_step_confirm()
@@ -81,7 +83,9 @@ class HLK2412ConfigFlow(ConfigFlow, domain=DOMAIN):
             await self.async_set_unique_id(
                 format_unique_id(address), raise_on_progress=False
             )
-            self._abort_if_unique_id_configured()
+            self._abort_if_unique_id_configured(
+                updates={CONF_ADDRESS: address}
+            )
             return self._create_entry_from_device(discovery_info)
 
         current_addresses = self._async_current_ids()

@@ -81,11 +81,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntryType) -> bool
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    try:
-        await device.update()
-    except Exception as ex:
-        _LOGGER.warning("Initial connection failed, will retry: %s", ex)
-
     return True
 
 
