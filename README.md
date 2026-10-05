@@ -65,6 +65,25 @@ Integration for **HLK-2412** Bluetooth Low Energy (BLE) mmWave radar sensors wit
 📊 **Motionless sensitivity gate 0-13** (0-255) – static detection sensitivity for each gate
 
 
+## Lovelace card
+
+The integration ships its own card, registered automatically (no resource to add):
+
+```yaml
+type: custom:hlk2412-card
+entry_id: <config entry id>   # pick the radar in the card editor
+title: Bedroom                # optional
+```
+
+- live presence, distances and light level straight from the radar (websocket, ~5 Hz,
+  nothing goes through the recorder)
+- per-gate moving/still energy charts (engineering mode) with peak hold and the
+  detection range shaded
+- drag in a chart to set the gate thresholds; set min/max gate, unmanned delay and
+  OUT pin polarity; everything is written to the radar at once with **Save to radar**
+- **Record empty room** captures 30 s of noise and can set thresholds to noise + margin
+- engineering mode toggle and background calibration
+
 ## Installation
 
 ### HACS (recommended)

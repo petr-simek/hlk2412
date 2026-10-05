@@ -1,17 +1,22 @@
 """Integration for HLK-2412 radar sensors."""
 
 import logging
+from pathlib import Path
 
 from homeassistant.components import bluetooth
+from homeassistant.components.frontend import add_extra_js_url
+from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_ADDRESS, CONF_MAC, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
-from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import config_validation as cv, device_registry as dr
+from homeassistant.helpers.typing import ConfigType
 
 from .const import CONF_RETRY_COUNT, DEFAULT_RETRY_COUNT, DOMAIN
 from .coordinator import ConfigEntryType, DataCoordinator
 from .device import HLK2412Device
+from .websocket import async_register as async_register_websocket
 
 PLATFORMS = [
     Platform.BINARY_SENSOR,
@@ -22,6 +27,22 @@ PLATFORMS = [
 ]
 
 _LOGGER = logging.getLogger(__name__)
+
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+CARD_URL = "/hlk2412/hlk2412-card.js"
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Register the Lovelace card and its websocket API."""
+    card = Path(__file__).parent / "frontend" / "hlk2412-card.js"
+    await hass.http.async_register_static_paths(
+        [StaticPathConfig(CARD_URL, str(card), cache_headers=False)]
+    )
+    # File mtime in the URL so browsers pick up a changed card.
+    mtime = await hass.async_add_executor_job(lambda: int(card.stat().st_mtime))
+    add_extra_js_url(hass, f"{CARD_URL}?v={mtime}")
+    async_register_websocket(hass)
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntryType) -> bool:

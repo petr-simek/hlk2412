@@ -60,6 +60,7 @@ GATE_ENERGY_KEYS = tuple(
 CONFIG_KEYS = (
     "firmware_version",
     "firmware_type",
+    "resolution",
     "min_gate",
     "max_gate",
     "unmanned_duration",
@@ -67,6 +68,22 @@ CONFIG_KEYS = (
     *(f"motion_sensitivity_gate_{i}" for i in range(GATES)),
     *(f"motionless_sensitivity_gate_{i}" for i in range(GATES)),
 )
+
+# Keys sent to state listeners (config editor) when they change.
+STATE_KEYS = frozenset((*CONFIG_KEYS, "calibration_active", "engineering_mode"))
+# Report values that change on almost every frame; throttled for entities.
+SLOW_KEYS = frozenset(
+    (
+        "move_distance_cm",
+        "move_energy",
+        "still_distance_cm",
+        "still_energy",
+        "light_level",
+        *GATE_ENERGY_KEYS,
+    )
+)
+# Distance resolution code -> metres per gate.
+RESOLUTIONS = {0: 0.75, 1: 0.5, 3: 0.2}
 
 # Whole connect (all establish_connection attempts + start_notify) must finish
 # within this time, otherwise a hung BlueZ/proxy connect would stall forever.
@@ -92,6 +109,10 @@ class HLK2412Device:
         self._client: BleakClientWithServiceCache | None = None
         self._data: dict[str, Any] = {"sensor_update_interval": 1.0}
         self._listeners: dict[str, list[Callable[[], None]]] = {}
+        # Unthrottled parsed report frames (live view in the card).
+        self._frame_listeners: list[Callable[[dict[str, Any]], None]] = []
+        # Connection and config changes (config editor in the card).
+        self._state_listeners: list[Callable[[], None]] = []
         self._connect_lock = asyncio.Lock()
         # Serializes whole config sessions (enable cfg ... end cfg).
         self._session_lock = asyncio.Lock()
@@ -137,6 +158,26 @@ class HLK2412Device:
 
         return unsubscribe
 
+    def subscribe_frames(
+        self, callback: Callable[[dict[str, Any]], None]
+    ) -> Callable[[], None]:
+        """Subscribe to every parsed report frame."""
+        return self._add(self._frame_listeners, callback)
+
+    def subscribe_state(self, callback: Callable[[], None]) -> Callable[[], None]:
+        """Subscribe to connection and configuration changes."""
+        return self._add(self._state_listeners, callback)
+
+    @staticmethod
+    def _add(listeners: list, callback: Callable) -> Callable[[], None]:
+        listeners.append(callback)
+
+        def unsubscribe() -> None:
+            with suppress(ValueError):
+                listeners.remove(callback)
+
+        return unsubscribe
+
     def set_local_value(self, key: str, value: Any) -> None:
         """Set a value locally (applied to the module by 'Apply configuration')."""
         self._update({key: value})
@@ -155,12 +196,17 @@ class HLK2412Device:
         for key in changed:
             for callback in listeners.get(key, ()):
                 callback()
+        if not STATE_KEYS.isdisjoint(changed):
+            for callback in tuple(self._state_listeners):
+                callback()
 
     def _notify_all(self) -> None:
         """Notify every listener (availability changed)."""
         for listeners in self._listeners.values():
             for callback in listeners:
                 callback()
+        for callback in tuple(self._state_listeners):
+            callback()
 
     # ------------------------------------------------------------- connection
 
@@ -303,14 +349,23 @@ class HLK2412Device:
     def _handle_report(self, payload: bytes) -> None:
         self.last_frame_time = now = time.monotonic()
         try:
-            parsed = self._parse_report(payload, now)
+            parsed = self._parse_report(payload)
         except (IndexError, ValueError) as ex:
             _LOGGER.debug("[%s] Failed to parse report: %s", self.address, ex)
             return
-        if parsed:
+        if not parsed:
+            return
+        for callback in tuple(self._frame_listeners):
+            callback(parsed)
+        # Distances/energies change on almost every frame; throttle them.
+        interval = self._data.get("sensor_update_interval", 1.0)
+        if now - self._last_sensor_update >= interval:
+            self._last_sensor_update = now
             self._update(parsed)
+        else:
+            self._update({k: v for k, v in parsed.items() if k not in SLOW_KEYS})
 
-    def _parse_report(self, payload: bytes, now: float) -> dict[str, Any] | None:
+    def _parse_report(self, payload: bytes) -> dict[str, Any] | None:
         """Parse a report frame payload: type, 0xAA, content..., 0x55, check."""
         if len(payload) < 11 or payload[1] != 0xAA or payload[-2] != 0x55:
             _LOGGER.debug("[%s] Invalid report: %s", self.address, payload.hex())
@@ -332,12 +387,6 @@ class HLK2412Device:
             "engineering_mode": engineering,
             "data_type": "engineering" if engineering else "basic",
         }
-
-        # Distances/energies change on almost every frame; throttle them.
-        interval = self._data.get("sensor_update_interval", 1.0)
-        if now - self._last_sensor_update < interval:
-            return result
-        self._last_sensor_update = now
 
         result["move_distance_cm"] = int.from_bytes(content[1:3], "little")
         result["move_energy"] = content[3]
@@ -439,26 +488,71 @@ class HLK2412Device:
                 values["firmware_version"] = f"V{fw[3]}.{fw[2]:02x}.{minor}"
                 values["firmware_type"] = fw_type
 
-            params = await self._command(CMD_READ_BASIC_PARAMS)
-            if len(params) >= 4:
-                values["min_gate"] = params[0]
-                values["max_gate"] = params[1]
-                values["unmanned_duration"] = int.from_bytes(params[2:4], "little")
-                if len(params) >= 5:
-                    values["out_pin_polarity"] = params[4]
-
-            for cmd, prefix in (
-                (CMD_READ_MOTION_SENSITIVITY, "motion_sensitivity_gate_"),
-                (CMD_READ_MOTIONLESS_SENSITIVITY, "motionless_sensitivity_gate_"),
-            ):
-                sens = await self._command(cmd)
-                if len(sens) >= GATES:
-                    for i in range(GATES):
-                        values[f"{prefix}{i}"] = sens[i]
+            values.update(await self._read_config_values())
         self._update(values)
         _LOGGER.info(
             "[%s] Firmware %s", self.address, values.get("firmware_version")
         )
+
+    async def _read_config_values(self) -> dict[str, Any]:
+        """Read gates, timeout, polarity, resolution and sensitivities.
+
+        Must run inside a config session.
+        """
+        values: dict[str, Any] = {}
+        params = await self._command(CMD_READ_BASIC_PARAMS)
+        if len(params) >= 4:
+            values["min_gate"] = params[0]
+            values["max_gate"] = params[1]
+            values["unmanned_duration"] = int.from_bytes(params[2:4], "little")
+            if len(params) >= 5:
+                values["out_pin_polarity"] = params[4]
+        try:
+            resolution = await self._command(CMD_READ_RESOLUTION)
+            if resolution:
+                values["resolution"] = resolution[0]
+        except OperationError as ex:
+            _LOGGER.debug("[%s] Read resolution failed: %s", self.address, ex)
+        for cmd, prefix in (
+            (CMD_READ_MOTION_SENSITIVITY, "motion_sensitivity_gate_"),
+            (CMD_READ_MOTIONLESS_SENSITIVITY, "motionless_sensitivity_gate_"),
+        ):
+            sens = await self._command(cmd)
+            if len(sens) >= GATES:
+                for i in range(GATES):
+                    values[f"{prefix}{i}"] = sens[i]
+        return values
+
+    async def reload_config(self) -> None:
+        """Read the configuration from the module again."""
+        async with self._config_session():
+            values = await self._read_config_values()
+        self._update(values)
+
+    async def write_config(
+        self,
+        min_gate: int,
+        max_gate: int,
+        unmanned_duration: int,
+        out_pin_polarity: int,
+        motion: list[int],
+        motionless: list[int],
+    ) -> None:
+        """Write the whole configuration in one session and read it back."""
+        if len(motion) != GATES or len(motionless) != GATES:
+            raise OperationError(f"Sensitivity must have exactly {GATES} values")
+        basic = (
+            bytes([min_gate, max_gate])
+            + unmanned_duration.to_bytes(2, "little")
+            + bytes([out_pin_polarity])
+        )
+        async with self._config_session():
+            await self._command(CMD_WRITE_BASIC_PARAMS, basic)
+            await self._command(CMD_WRITE_MOTION_SENSITIVITY, bytes(motion))
+            await self._command(CMD_WRITE_MOTIONLESS_SENSITIVITY, bytes(motionless))
+            values = await self._read_config_values()
+        self._update(values)
+        _LOGGER.info("[%s] Configuration written", self.address)
 
     async def read_configuration(self) -> dict[str, Any]:
         """Read resolution and MAC (diagnostics, on demand)."""
@@ -472,7 +566,8 @@ class HLK2412Device:
                 config["mac_address"] = ":".join(f"{b:02X}" for b in mac[:6])
         return config
 
-    async def _set_engineering(self, enable: bool) -> None:
+    async def set_engineering_mode(self, enable: bool) -> None:
+        """Switch engineering (per-gate energy) reporting on or off."""
         async with self._config_session():
             await self._command(
                 CMD_ENABLE_ENGINEERING if enable else CMD_DISABLE_ENGINEERING
@@ -481,13 +576,13 @@ class HLK2412Device:
     async def enable_engineering_mode(self) -> bool:
         """Enable engineering mode."""
         return await self._run(
-            "Enable engineering mode", lambda: self._set_engineering(True)
+            "Enable engineering mode", lambda: self.set_engineering_mode(True)
         )
 
     async def disable_engineering_mode(self) -> bool:
         """Disable engineering mode."""
         return await self._run(
-            "Disable engineering mode", lambda: self._set_engineering(False)
+            "Disable engineering mode", lambda: self.set_engineering_mode(False)
         )
 
     async def query_calibration_status(self) -> bool:
