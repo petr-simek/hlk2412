@@ -87,6 +87,8 @@ for gate_num in range(14):
         icon="mdi:pulse",
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
+        # The card reads gate energies directly; as entities they flood the recorder.
+        entity_registry_enabled_default=False,
     )
     SENSOR_TYPES[f"static_gate_{gate_num}"] = SensorEntityDescription(
         key=f"static_gate_{gate_num}_energy",
@@ -94,6 +96,8 @@ for gate_num in range(14):
         icon="mdi:signal-variant",
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
+        # The card reads gate energies directly; as entities they flood the recorder.
+        entity_registry_enabled_default=False,
     )
 
 

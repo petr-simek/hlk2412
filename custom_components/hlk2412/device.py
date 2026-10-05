@@ -124,6 +124,8 @@ class HLK2412Device:
         self._disconnected.set()
         self._expected_disconnect = False
         self._last_sensor_update = 0.0
+        # Last fully applied report payload; an idle radar repeats it.
+        self._last_report: bytes | None = None
         self._calibration_poll_task: asyncio.Task | None = None
         self.last_frame_time = 0.0
 
@@ -228,6 +230,7 @@ class HLK2412Device:
                 return
             _LOGGER.debug("[%s] Connecting", self.address)
             self._rx_buffer.clear()
+            self._last_report = None
             client: BleakClientWithServiceCache | None = None
             try:
                 async with asyncio.timeout(CONNECT_TIMEOUT):
@@ -360,6 +363,8 @@ class HLK2412Device:
 
     def _handle_report(self, payload: bytes) -> None:
         self.last_frame_time = now = time.monotonic()
+        if payload == self._last_report:
+            return
         try:
             parsed = self._parse_report(payload)
         except (IndexError, ValueError) as ex:
@@ -373,8 +378,11 @@ class HLK2412Device:
         interval = self._data.get("sensor_update_interval", 1.0)
         if now - self._last_sensor_update >= interval:
             self._last_sensor_update = now
+            self._last_report = payload
             self._update(parsed)
         else:
+            # Throttled values were skipped, so a repeat must still be applied.
+            self._last_report = None
             self._update({k: v for k, v in parsed.items() if k not in SLOW_KEYS})
 
     def _parse_report(self, payload: bytes) -> dict[str, Any] | None:

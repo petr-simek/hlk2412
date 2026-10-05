@@ -41,6 +41,9 @@ Integration for **HLK-2412** Bluetooth Low Energy (BLE) mmWave radar sensors wit
 📊 **Move gate 0-13 energy** – motion energy for each gate (0-255)  
 📊 **Static gate 0-13 energy** – static detection energy for each gate (0-255)
 
+These 28 sensors are disabled by default: they update several times per second and
+would flood the recorder. The Lovelace card reads the energies directly.
+
 #### Diagnostic
 🔧 **Firmware version** – device firmware version  
 🚪 **Minimum gate** – minimum detection gate  
@@ -83,6 +86,10 @@ title: Bedroom                # optional
   OUT pin polarity; everything is written to the radar at once with **Save to radar**
 - **Record empty room** captures 30 s of noise and can set thresholds to noise + margin
 - engineering mode toggle and background calibration
+
+Engineering mode is switched on automatically while a card for the radar is open and
+off again 60 s after the last one is closed (also after a Home Assistant restart).
+Switching it manually (card or button) takes precedence: switched on, it stays on.
 
 ## Installation
 
@@ -131,7 +138,7 @@ The integration is based on **HLK-LD2412** UART protocol over Bluetooth:
 - Restart Home Assistant
 
 ### No Data
-- Integration automatically enables Engineering Mode
+- Engineering mode is only on while the Lovelace card is open (see above)
 - Check logs: `config/home-assistant.log`
 - Enable debug logging:
 

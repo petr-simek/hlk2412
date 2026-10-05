@@ -128,11 +128,13 @@ def ws_subscribe(
 
     unsub_frames = device.subscribe_frames(on_frame)
     unsub_state = device.subscribe_state(on_state)
+    remove_viewer = coordinator.async_add_viewer()
 
     @callback
     def unsubscribe() -> None:
         unsub_frames()
         unsub_state()
+        remove_viewer()
 
     connection.subscriptions[msg_id] = unsubscribe
     connection.send_result(msg_id)
@@ -215,9 +217,14 @@ async def ws_engineering(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
 ) -> None:
     """Switch engineering mode."""
-    await _run(
-        hass, connection, msg, lambda device: device.set_engineering_mode(msg["enable"])
-    )
+
+    async def switch(device) -> None:
+        _coordinator(hass, msg["entry_id"]).async_engineering_set_by_user(
+            msg["enable"]
+        )
+        await device.set_engineering_mode(msg["enable"])
+
+    await _run(hass, connection, msg, switch)
 
 
 @websocket_api.websocket_command(

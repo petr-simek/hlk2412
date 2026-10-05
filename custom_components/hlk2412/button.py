@@ -76,10 +76,12 @@ class HLK2412Button(HLK2412Entity, ButtonEntity):
         device = self.coordinator.device
         key = self.entity_description.key
         if key == "toggle_engineering":
-            if device.data.get("engineering_mode", False):
-                ok = await device.disable_engineering_mode()
-            else:
+            enable = not device.data.get("engineering_mode", False)
+            self.coordinator.async_engineering_set_by_user(enable)
+            if enable:
                 ok = await device.enable_engineering_mode()
+            else:
+                ok = await device.disable_engineering_mode()
         elif key == "start_calibration":
             ok = await device.start_calibration()
         elif key == "restart_module":

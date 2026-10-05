@@ -38,6 +38,9 @@ STALE_RECONNECT_AFTER = 30.0
 NOT_PRESENT_WAIT = 30.0
 # Retry reading firmware/config if it failed right after connecting.
 INFO_RETRY_INTERVAL = 30.0
+# Engineering mode (per-gate energies) is on only while a card is open: it adds
+# 28 sensor updates per frame. Switched off this long after the last viewer left.
+VIEWER_GRACE = 60.0
 
 CONNECT_ERRORS = (*BLEAK_RETRY_EXCEPTIONS, BleakError, OperationError, TimeoutError)
 
@@ -68,6 +71,12 @@ class DataCoordinator:
         self._advertised = asyncio.Event()
         self._last_info_attempt = 0.0
         self._scanner_names: dict[str, str] = {}
+        self._viewers = 0
+        # Engineering mode is ours to switch off (also left on from a previous run).
+        self._auto_engineering = True
+        # The user switched it off while watching; respected until all viewers leave.
+        self._user_disabled = False
+        self._engineering_task: asyncio.Task | None = None
 
     @callback
     def async_start(self) -> Callable[[], None]:
@@ -105,6 +114,72 @@ class DataCoordinator:
         if self._task:
             self._task.cancel()
             self._task = None
+        if self._engineering_task:
+            self._engineering_task.cancel()
+            self._engineering_task = None
+
+    @callback
+    def async_add_viewer(self) -> Callable[[], None]:
+        """Register an open card; returns the callback to unregister it."""
+        self._viewers += 1
+        self._schedule_engineering()
+        removed = False
+
+        @callback
+        def remove() -> None:
+            nonlocal removed
+            if removed:
+                return
+            removed = True
+            self._viewers -= 1
+            self._schedule_engineering()
+
+        return remove
+
+    @callback
+    def async_engineering_set_by_user(self, enable: bool) -> None:
+        """Engineering mode was switched explicitly; stop managing it."""
+        self._auto_engineering = False
+        self._user_disabled = not enable
+
+    @callback
+    def _schedule_engineering(self) -> None:
+        if self._engineering_task:
+            self._engineering_task.cancel()
+        self._engineering_task = self.hass.async_create_background_task(
+            self._apply_engineering(), name=f"hlk2412-eng-{self.ble_device.address}"
+        )
+
+    async def _apply_engineering(self) -> None:
+        """Engineering on while somebody watches, off after VIEWER_GRACE."""
+        want = self._viewers > 0
+        if not want:
+            await asyncio.sleep(VIEWER_GRACE)
+            self._user_disabled = False
+        device = self.device
+        if not device.is_connected:
+            return  # applied again after reconnecting
+        if want == bool(device.data.get("engineering_mode")):
+            return
+        if want and self._user_disabled:
+            return
+        if not want and not self._auto_engineering:
+            return
+        self._auto_engineering = want
+        try:
+            # A viewer change must not abort a running config session.
+            await asyncio.shield(device.set_engineering_mode(want))
+        except CONNECT_ERRORS as ex:
+            self.logger.debug(
+                "%s: switching engineering mode failed: %s", self.device_name, ex
+            )
+            return
+        self.logger.debug(
+            "%s: engineering mode %s (%d viewers)",
+            self.device_name,
+            "on" if want else "off",
+            self._viewers,
+        )
 
     async def _wait_for_advertisement(self) -> None:
         self._advertised.clear()
@@ -161,6 +236,7 @@ class DataCoordinator:
                 backoff = MIN_BACKOFF
                 self._last_info_attempt = time.monotonic()
                 self._update_connection_path()
+                self._schedule_engineering()
 
             if await device.wait_disconnected(WATCHDOG_INTERVAL):
                 # Give the module/proxy a moment before reconnecting.
