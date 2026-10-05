@@ -1,5 +1,5 @@
 {
   "name": "HLK-2412 mmWave Radar",
   "render_readme": true,
-  "homeassistant": "2024.1.0"
+  "homeassistant": "2024.6.0"
 }
