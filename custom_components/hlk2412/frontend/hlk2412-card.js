@@ -25,6 +25,8 @@ const STRINGS = {
     eng_off_btn: "Turn off engineering",
     min_gate: "Min gate",
     max_gate: "Max gate",
+    from: "from",
+    to: "to",
     unmanned: "Unmanned delay (s)",
     polarity: "OUT pin",
     pol_high: "High when occupied",
@@ -62,6 +64,8 @@ const STRINGS = {
     eng_off_btn: "Vypnout engineering",
     min_gate: "Min gate",
     max_gate: "Max gate",
+    from: "od",
+    to: "do",
     unmanned: "Zpoždění neobsazeno (s)",
     polarity: "OUT pin",
     pol_high: "High při obsazení",
@@ -272,7 +276,7 @@ class Hlk2412Card extends HTMLElement {
     const n = this._gates();
     return {
       min_gate: s.min_gate ?? 0,
-      max_gate: s.max_gate ?? n - 1,
+      max_gate: s.max_gate ?? n,
       unmanned_duration: s.unmanned_duration ?? 5,
       out_pin_polarity: s.out_pin_polarity ?? 0,
       motion: Array.from({ length: n }, (_, i) => s[`motion_sensitivity_gate_${i}`] ?? 0),
@@ -386,10 +390,15 @@ class Hlk2412Card extends HTMLElement {
     const title = this._config.title || (s && s.title) || this._title || "HLK-2412";
     const n = this._gates();
 
-    const gateOpts = (sel, from) =>
-      Array.from({ length: n - from }, (_, k) => k + from)
-        .map((g) => `<option value="${g}" ${g === sel ? "selected" : ""}>${g} (${(g * this._gateSize()).toFixed(2)} m)</option>`)
-        .join("");
+    // The radar stores min_gate as the first gate index but max_gate as a
+    // gate count (14 = up to gate 13); options show gate index + distance.
+    const gs = this._gateSize();
+    const opts = (values, sel, label) =>
+      values.map((g) => `<option value="${g}" ${g === sel ? "selected" : ""}>${label(g)}</option>`).join("");
+    const minOpts = opts(Array.from({ length: n }, (_, g) => g), c.min_gate,
+      (g) => `${g} (${t.from} ${+(g * gs).toFixed(2)} m)`);
+    const maxOpts = opts(Array.from({ length: n }, (_, k) => k + 1), c.max_gate,
+      (g) => `${g - 1} (${t.to} ${+(g * gs).toFixed(2)} m)`);
 
     root.innerHTML = `
       <style>${CSS}
@@ -418,8 +427,8 @@ class Hlk2412Card extends HTMLElement {
           admin
             ? `
         <div class="row">
-          <label>${t.min_gate}<select id="min_gate" ${busy ? "disabled" : ""}>${gateOpts(c.min_gate, 0)}</select></label>
-          <label>${t.max_gate}<select id="max_gate" ${busy ? "disabled" : ""}>${gateOpts(c.max_gate, 1)}</select></label>
+          <label>${t.min_gate}<select id="min_gate" ${busy ? "disabled" : ""}>${minOpts}</select></label>
+          <label>${t.max_gate}<select id="max_gate" ${busy ? "disabled" : ""}>${maxOpts}</select></label>
           <label>${t.unmanned}<input id="unmanned" type="number" min="0" max="65535" value="${c.unmanned_duration}" ${busy ? "disabled" : ""}></label>
           <label>${t.polarity}<select id="polarity" ${busy ? "disabled" : ""}>
             <option value="0" ${c.out_pin_polarity === 0 ? "selected" : ""}>${t.pol_high}</option>
@@ -493,14 +502,14 @@ class Hlk2412Card extends HTMLElement {
     on("min_gate", "change", (e) => {
       this._edit((d) => {
         d.min_gate = Number(e.target.value);
-        if (d.max_gate < d.min_gate) d.max_gate = d.min_gate;
+        if (d.max_gate <= d.min_gate) d.max_gate = d.min_gate + 1;
       });
       this._render();
     });
     on("max_gate", "change", (e) => {
       this._edit((d) => {
         d.max_gate = Number(e.target.value);
-        if (d.min_gate > d.max_gate) d.min_gate = d.max_gate;
+        if (d.min_gate >= d.max_gate) d.min_gate = d.max_gate - 1;
       });
       this._render();
     });
@@ -633,7 +642,7 @@ class Hlk2412Card extends HTMLElement {
     }
     for (let i = 0; i < n; i++) {
       const x = M.l + i * cw;
-      const inRange = i >= c.min_gate && i <= c.max_gate;
+      const inRange = i >= c.min_gate && i < c.max_gate;
       if (!inRange) {
         out.push(`<rect x="${x}" y="${M.t}" width="${cw}" height="${ph}" fill="var(--secondary-text-color)" opacity=".12"/>`);
       }

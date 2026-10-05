@@ -152,7 +152,8 @@ async def _run(
         vol.Required("type"): "hlk2412/write_config",
         vol.Required("entry_id"): str,
         vol.Required("min_gate"): vol.All(int, vol.Range(min=0, max=GATES - 1)),
-        vol.Required("max_gate"): vol.All(int, vol.Range(min=1, max=GATES - 1)),
+        # max_gate is a gate count on the radar (14 = up to gate 13).
+        vol.Required("max_gate"): vol.All(int, vol.Range(min=1, max=GATES)),
         vol.Required("unmanned_duration"): vol.All(int, vol.Range(min=0, max=65535)),
         vol.Required("out_pin_polarity"): vol.In([0, 1]),
         vol.Required("motion"): _SENSITIVITY,
@@ -165,8 +166,8 @@ async def ws_write_config(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
 ) -> None:
     """Write gates, timeout, polarity and all sensitivities."""
-    if msg["min_gate"] > msg["max_gate"]:
-        connection.send_error(msg["id"], "invalid", "min_gate > max_gate")
+    if msg["min_gate"] >= msg["max_gate"]:
+        connection.send_error(msg["id"], "invalid", "min_gate >= max_gate")
         return
     await _run(
         hass,
