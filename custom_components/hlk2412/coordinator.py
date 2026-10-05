@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from contextlib import suppress
 import logging
 import time
 from typing import TYPE_CHECKING
@@ -14,6 +15,7 @@ from bleak_retry_connector import BLEAK_RETRY_EXCEPTIONS
 from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import device_registry as dr
 
 from .device import OperationError
 
@@ -34,6 +36,8 @@ STALE_RECOVER_AFTER = 10.0
 STALE_RECONNECT_AFTER = 30.0
 # How long to wait for an advertisement when the device is out of range.
 NOT_PRESENT_WAIT = 30.0
+# Retry reading firmware/config if it failed right after connecting.
+INFO_RETRY_INTERVAL = 30.0
 
 CONNECT_ERRORS = (*BLEAK_RETRY_EXCEPTIONS, BleakError, OperationError, TimeoutError)
 
@@ -49,6 +53,7 @@ class DataCoordinator:
         device: HLK2412Device,
         base_unique_id: str,
         device_name: str,
+        entry_id: str,
     ) -> None:
         """Initialize the coordinator."""
         self.hass = hass
@@ -57,9 +62,12 @@ class DataCoordinator:
         self.device = device
         self.device_name = device_name
         self.base_unique_id = base_unique_id
+        self.entry_id = entry_id
         self._task: asyncio.Task | None = None
         self._unsub: Callable[[], None] | None = None
         self._advertised = asyncio.Event()
+        self._last_info_attempt = 0.0
+        self._scanner_names: dict[str, str] = {}
 
     @callback
     def async_start(self) -> Callable[[], None]:
@@ -151,12 +159,89 @@ class DataCoordinator:
                     )
                 failures = 0
                 backoff = MIN_BACKOFF
+                self._last_info_attempt = time.monotonic()
+                self._update_connection_path()
 
             if await device.wait_disconnected(WATCHDOG_INTERVAL):
                 # Give the module/proxy a moment before reconnecting.
                 await asyncio.sleep(MIN_BACKOFF)
                 continue
             await self._check_stale()
+            self._update_connection_path()
+            await self._retry_device_info()
+
+    def _update_connection_path(self) -> None:
+        """Publish which adapter/proxy carries the connection and its RSSI."""
+        device = self.device
+        address = self.ble_device.address
+        # habluetooth's client wrapper keeps the scanner it connected through.
+        scanner = getattr(device.client, "_connected_scanner", None)
+        if scanner is None:
+            device.set_connection_path(None)
+            return
+        source = scanner.source
+        rssi = None
+        with suppress(Exception):  # private API, best effort
+            if found := scanner.get_discovered_device_advertisement_data(address):
+                rssi = found[1].rssi
+        previous = device.data.get("connection_path") or {}
+        if previous.get("source") != source:
+            self.logger.info(
+                "%s: connected via %s (%s)",
+                self.device_name,
+                self._scanner_names.get(source)
+                or self._scanner_names.setdefault(
+                    source, self._scanner_name(source, scanner.name)
+                ),
+                source,
+            )
+        device.set_connection_path(
+            {
+                "source": source,
+                "name": self._scanner_names.get(source)
+                or self._scanner_names.setdefault(
+                    source, self._scanner_name(source, scanner.name)
+                ),
+                "rssi": rssi,
+            }
+        )
+
+    def _scanner_name(self, source: str, fallback: str) -> str:
+        """Friendly name of the adapter/proxy with this Bluetooth address."""
+        registry = dr.async_get(self.hass)
+        connection = (dr.CONNECTION_BLUETOOTH, source)
+        if hasattr(registry, "async_get_devices"):  # HA 2026.9+
+            devices = registry.async_get_devices(connections={connection})
+            device = devices[0] if devices else None
+        else:
+            device = registry.async_get_device(connections={connection})
+        if device is None:
+            # ESPHome proxies store their Bluetooth MAC in the config entry.
+            for entry in self.hass.config_entries.async_entries():
+                if str(entry.data.get("bluetooth_mac_address", "")).upper() == source:
+                    devices = dr.async_entries_for_config_entry(
+                        registry, entry.entry_id
+                    )
+                    device = devices[0] if devices else None
+                    break
+        name = (device and (device.name_by_user or device.name)) or fallback
+        # Local adapters are named like "hci0 (MAC)"; the MAC is shown separately.
+        return name.removesuffix(f" ({source})")
+
+    async def _retry_device_info(self) -> None:
+        device = self.device
+        if (
+            "firmware_version" in device.data
+            or device.busy
+            or not device.is_connected
+            or time.monotonic() - self._last_info_attempt < INFO_RETRY_INTERVAL
+        ):
+            return
+        self._last_info_attempt = time.monotonic()
+        try:
+            await device.read_device_info()
+        except CONNECT_ERRORS as ex:
+            self.logger.debug("%s: device info retry failed: %s", self.device_name, ex)
 
     async def _check_stale(self) -> None:
         device = self.device

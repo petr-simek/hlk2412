@@ -46,8 +46,13 @@ def _coordinator(hass: HomeAssistant, entry_id: str) -> DataCoordinator:
     return entry.runtime_data
 
 
-def _name(hass: HomeAssistant, unique_id: str | None, fallback: str) -> str:
-    device = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, unique_id)})
+def _name(hass: HomeAssistant, entry_id: str, unique_id: str | None, fallback: str) -> str:
+    registry = dr.async_get(hass)
+    identifier = (DOMAIN, unique_id or "")
+    if hasattr(registry, "async_get_device_by_identifier"):  # HA 2026.9+
+        device = registry.async_get_device_by_identifier(identifier, entry_id)
+    else:
+        device = registry.async_get_device(identifiers={identifier})
     if device is None:
         return fallback
     return device.name_by_user or device.name or fallback
@@ -58,7 +63,9 @@ def _state(hass: HomeAssistant, coordinator: DataCoordinator) -> dict[str, Any]:
     data = device.data
     state = {key: data.get(key) for key in STATE_KEYS}
     state["connected"] = device.is_connected
-    state["title"] = _name(hass, coordinator.base_unique_id, coordinator.device_name)
+    state["title"] = _name(
+        hass, coordinator.entry_id, coordinator.base_unique_id, coordinator.device_name
+    )
     state["gates"] = GATES
     state["gate_size"] = RESOLUTIONS.get(data.get("resolution"), 0.75)
     return state
@@ -73,7 +80,7 @@ def ws_devices(
     result = [
         {
             "entry_id": entry.entry_id,
-            "title": _name(hass, entry.unique_id, entry.title),
+            "title": _name(hass, entry.entry_id, entry.unique_id, entry.title),
             "address": entry.unique_id,
             "loaded": entry.state is ConfigEntryState.LOADED,
         }

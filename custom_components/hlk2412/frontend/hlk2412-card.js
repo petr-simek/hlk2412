@@ -11,6 +11,7 @@ const VERSION = "1.2.0";
 const STRINGS = {
   en: {
     connected: "Connected",
+    via: "via",
     disconnected: "Disconnected",
     engineering: "Engineering",
     basic: "Basic",
@@ -50,6 +51,7 @@ const STRINGS = {
   },
   cs: {
     connected: "Připojeno",
+    via: "přes",
     disconnected: "Odpojeno",
     engineering: "Engineering",
     basic: "Základní",
@@ -102,6 +104,7 @@ const CSS = `
   .chip { font-size: .8em; padding: 2px 8px; border-radius: 10px;
           background: var(--secondary-background-color); color: var(--secondary-text-color); }
   .chip.ok { background: rgba(var(--rgb-success-color, 67,160,71), .18); color: var(--success-color, #43a047); }
+  .chip.warn { background: rgba(var(--rgb-warning-color, 255,166,0), .18); color: var(--warning-color, #ffa600); }
   .chip.bad { background: rgba(var(--rgb-error-color, 219,68,55), .18); color: var(--error-color, #db4437); }
   .presence { display: flex; gap: 16px; flex-wrap: wrap; margin: 10px 0 4px; font-size: .95em; }
   .presence .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%;
@@ -409,6 +412,7 @@ class Hlk2412Card extends HTMLElement {
         <div class="head">
           <span class="title">${esc(title)}</span>
           ${s && s.firmware_version ? `<span class="chip">${s.firmware_version}</span>` : ""}
+          ${connected && s.connection_path ? this._pathChip(s.connection_path) : ""}
           <span class="chip">${eng ? t.engineering : t.basic}</span>
           <span class="chip ${connected ? "ok" : "bad"}">${connected ? t.connected : t.disconnected}</span>
         </div>
@@ -470,6 +474,14 @@ class Hlk2412Card extends HTMLElement {
     this._built = true;
     this._bind();
     this._updateLive();
+  }
+
+  _pathChip(path) {
+    const rssi = path.rssi;
+    const cls = rssi == null ? "" : rssi >= -75 ? "ok" : rssi < -88 ? "bad" : "warn";
+    return `<span class="chip ${cls}" title="${esc(path.source)}">${this._t.via} ${esc(path.name)}${
+      rssi == null ? "" : ` · ${rssi} dBm`
+    }</span>`;
   }
 
   _gateSize() {

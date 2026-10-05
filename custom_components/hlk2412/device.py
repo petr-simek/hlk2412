@@ -70,7 +70,9 @@ CONFIG_KEYS = (
 )
 
 # Keys sent to state listeners (config editor) when they change.
-STATE_KEYS = frozenset((*CONFIG_KEYS, "calibration_active", "engineering_mode"))
+STATE_KEYS = frozenset(
+    (*CONFIG_KEYS, "calibration_active", "engineering_mode", "connection_path")
+)
 # Report values that change on almost every frame; throttled for entities.
 SLOW_KEYS = frozenset(
     (
@@ -136,6 +138,15 @@ class HLK2412Device:
     def is_connected(self) -> bool:
         """Return if device is connected."""
         return self._client is not None and self._client.is_connected
+
+    @property
+    def client(self) -> BleakClientWithServiceCache | None:
+        """Return the active BLE client."""
+        return self._client
+
+    def set_connection_path(self, path: dict[str, Any] | None) -> None:
+        """Store which adapter/proxy the connection goes through."""
+        self._update({"connection_path": path})
 
     @property
     def busy(self) -> bool:
@@ -274,6 +285,7 @@ class HLK2412Device:
         self._rx_buffer.clear()
         self._fail_pending(OperationError("Disconnected"))
         self._disconnected.set()
+        self._data.pop("connection_path", None)
         if self._expected_disconnect:
             _LOGGER.debug("[%s] Disconnected", self.address)
         else:

@@ -84,6 +84,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntryType) -> bool
         device,
         entry.unique_id,
         entry.title,
+        entry.entry_id,
     )
 
     device_registry = dr.async_get(hass)
