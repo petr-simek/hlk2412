@@ -53,9 +53,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntryType) -> bool
             f"Could not find HLK-2412 device with address {address}"
         )
 
-    device = HLK2412Device(ble_device=ble_device)
-
     retry_count = entry.options.get(CONF_RETRY_COUNT, DEFAULT_RETRY_COUNT)
+    device = HLK2412Device(ble_device=ble_device, max_attempts=retry_count)
 
     coordinator = entry.runtime_data = DataCoordinator(
         hass,
@@ -64,7 +63,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntryType) -> bool
         device,
         entry.unique_id,
         entry.title,
-        retry_count,
     )
 
     device_registry = dr.async_get(hass)
@@ -77,15 +75,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntryType) -> bool
         connections={(dr.CONNECTION_BLUETOOTH, address)},
     )
 
-    entry.async_on_unload(coordinator.async_start())
-
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    # Start connecting only once entities exist, so they see the first data.
+    entry.async_on_unload(coordinator.async_start())
 
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
-    device = entry.runtime_data.device
-    await device.disconnect()
-    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    coordinator = entry.runtime_data
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unload_ok:
+        # Stop the reconnect loop before disconnecting, or it would reconnect.
+        coordinator.async_stop()
+        await coordinator.device.disconnect()
+    return unload_ok

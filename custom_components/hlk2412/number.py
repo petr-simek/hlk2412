@@ -109,5 +109,8 @@ class HLK2412Number(HLK2412Entity, NumberEntity):
 
     async def async_set_native_value(self, value: float) -> None:
         """Update the value."""
-        self.coordinator.device._data[self.entity_description.key] = int(value)
-        self.coordinator.device._notify_callbacks()
+        key = self.entity_description.key
+        # The update interval is fractional; all module parameters are integers.
+        self.coordinator.device.set_local_value(
+            key, value if key == "sensor_update_interval" else int(value)
+        )

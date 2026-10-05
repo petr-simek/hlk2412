@@ -1,16 +1,17 @@
-"""HLK-2412 device implementation with UART protocol."""
+"""HLK-2412 device implementation with UART-over-BLE protocol."""
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager, suppress
 import logging
 import time
 from typing import Any
 
-from bleak import BleakClient
 from bleak.backends.device import BLEDevice
+from bleak.exc import BleakError
 from bleak_retry_connector import (
-    BLEAK_RETRY_EXCEPTIONS,
     BleakClientWithServiceCache,
     establish_connection,
 )
@@ -20,69 +21,95 @@ _LOGGER = logging.getLogger(__name__)
 CHARACTERISTIC_NOTIFY = "0000fff1-0000-1000-8000-00805f9b34fb"
 CHARACTERISTIC_WRITE = "0000fff2-0000-1000-8000-00805f9b34fb"
 
-TX_HEADER = "FDFCFBFA"
-TX_FOOTER = "04030201"
-RX_HEADER = "F4F3F2F1"
-RX_FOOTER = "F8F7F6F5"
+TX_HEADER = bytes.fromhex("FDFCFBFA")
+TX_FOOTER = bytes.fromhex("04030201")
+RX_HEADER = bytes.fromhex("F4F3F2F1")
+RX_FOOTER = bytes.fromhex("F8F7F6F5")
+HEADER_LEN = 4
+# Longest valid frame is an engineering report (~45 B); anything above is garbage.
+MAX_FRAME_PAYLOAD = 128
+MAX_BUFFER = 512
 
-CMD_ENABLE_CFG = "00FF"
-CMD_END_CFG = "00FE"
-CMD_READ_FIRMWARE = "00A0"
-CMD_READ_RESOLUTION = "0011"
-CMD_READ_BASIC_PARAMS = "0012"
-CMD_WRITE_BASIC_PARAMS = "0002"
-CMD_WRITE_MOTION_SENSITIVITY = "0003"
-CMD_WRITE_MOTIONLESS_SENSITIVITY = "0004"
-CMD_READ_MOTION_SENSITIVITY = "0013"
-CMD_READ_MOTIONLESS_SENSITIVITY = "0014"
-CMD_READ_LIGHT_SENSE = "001C"
-CMD_READ_MAC = "00A5"
-CMD_ENABLE_ENGINEERING = "0062"
-CMD_DISABLE_ENGINEERING = "0063"
-CMD_START_CALIBRATION = "000B"
-CMD_QUERY_CALIBRATION = "001B"
-CMD_FACTORY_RESET = "00A2"
-CMD_RESTART_MODULE = "00A3"
+CMD_ENABLE_CFG = 0x00FF
+CMD_END_CFG = 0x00FE
+CMD_READ_FIRMWARE = 0x00A0
+CMD_READ_RESOLUTION = 0x0011
+CMD_READ_BASIC_PARAMS = 0x0012
+CMD_WRITE_BASIC_PARAMS = 0x0002
+CMD_WRITE_MOTION_SENSITIVITY = 0x0003
+CMD_WRITE_MOTIONLESS_SENSITIVITY = 0x0004
+CMD_READ_MOTION_SENSITIVITY = 0x0013
+CMD_READ_MOTIONLESS_SENSITIVITY = 0x0014
+CMD_READ_MAC = 0x00A5
+CMD_ENABLE_ENGINEERING = 0x0062
+CMD_DISABLE_ENGINEERING = 0x0063
+CMD_START_CALIBRATION = 0x000B
+CMD_QUERY_CALIBRATION = 0x001B
+CMD_FACTORY_RESET = 0x00A2
+CMD_RESTART_MODULE = 0x00A3
 
-DISCONNECT_DELAY = 8.5
-COMMAND_TIMEOUT = 5
+FRAME_TYPE_ENGINEERING = 0x01
+FRAME_TYPE_BASIC = 0x02
+
+GATES = 14
+GATE_ENERGY_KEYS = tuple(
+    [f"move_gate_{i}_energy" for i in range(GATES)]
+    + [f"static_gate_{i}_energy" for i in range(GATES)]
+)
+# Values read from the module in config mode; cleared after a factory reset.
+CONFIG_KEYS = (
+    "firmware_version",
+    "firmware_type",
+    "min_gate",
+    "max_gate",
+    "unmanned_duration",
+    "out_pin_polarity",
+    *(f"motion_sensitivity_gate_{i}" for i in range(GATES)),
+    *(f"motionless_sensitivity_gate_{i}" for i in range(GATES)),
+)
+
+# Whole connect (all establish_connection attempts + start_notify) must finish
+# within this time, otherwise a hung BlueZ/proxy connect would stall forever.
+CONNECT_TIMEOUT = 75.0
+DISCONNECT_TIMEOUT = 10.0
+COMMAND_TIMEOUT = 3.0
+ENABLE_CFG_ATTEMPTS = 3
+
+_MISSING = object()
 
 
 class OperationError(Exception):
     """Raised when an operation fails."""
 
 
-def _unwrap_frame(data: bytes, header: str, footer: str) -> bytes:
-    """Remove header and footer from a framed message."""
-    hdr = bytearray.fromhex(header)
-    ftr = bytearray.fromhex(footer)
-    if data.startswith(hdr) and data.endswith(ftr):
-        length = int.from_bytes(data[len(hdr) : len(hdr) + 2], "little")
-        return data[len(hdr) + 2 : len(hdr) + 2 + length]
-    return data
-
-
 class HLK2412Device:
-    """Representation of HLK-2412 device with UART protocol."""
+    """Representation of HLK-2412 device with UART protocol over BLE."""
 
-    def __init__(self, ble_device: BLEDevice, password: str | None = None) -> None:
+    def __init__(self, ble_device: BLEDevice, max_attempts: int = 3) -> None:
         """Initialize the device."""
         self.ble_device = ble_device
-        self._password = password or "HiLink"
+        self._max_attempts = max(1, max_attempts)
         self._client: BleakClientWithServiceCache | None = None
-        self._data: dict[str, Any] = {}
-        self._callbacks: list = []
-        self._lock = asyncio.Lock()
-        self._operation_lock = asyncio.Lock()
-        self._notify_future: asyncio.Future[bytearray] | None = None
-        self._disconnect_timer: asyncio.TimerHandle | None = None
+        self._data: dict[str, Any] = {"sensor_update_interval": 1.0}
+        self._listeners: dict[str, list[Callable[[], None]]] = {}
+        self._connect_lock = asyncio.Lock()
+        # Serializes whole config sessions (enable cfg ... end cfg).
+        self._session_lock = asyncio.Lock()
+        self._rx_buffer = bytearray()
+        self._pending_ack: tuple[bytes, asyncio.Future[bytes]] | None = None
+        self._disconnected = asyncio.Event()
+        self._disconnected.set()
         self._expected_disconnect = False
-        self.loop = asyncio.get_event_loop()
-        self._last_full_update: float = -3600
-        self._last_sensor_update: float = 0
+        self._last_sensor_update = 0.0
         self._calibration_poll_task: asyncio.Task | None = None
-        # Default sensor update interval (seconds)
-        self._data["sensor_update_interval"] = 1.0
+        self.last_frame_time = 0.0
+
+    # ------------------------------------------------------------------ state
+
+    @property
+    def address(self) -> str:
+        """Return BLE address."""
+        return self.ble_device.address
 
     @property
     def is_connected(self) -> bool:
@@ -90,793 +117,478 @@ class HLK2412Device:
         return self._client is not None and self._client.is_connected
 
     @property
+    def busy(self) -> bool:
+        """Return True while a config session is running (no data frames)."""
+        return self._session_lock.locked()
+
+    @property
     def data(self) -> dict[str, Any]:
         """Return device data."""
         return self._data
 
-    def subscribe(self, callback) -> callable:
-        """Subscribe to device updates."""
-        self._callbacks.append(callback)
+    def subscribe(self, key: str, callback: Callable[[], None]) -> Callable[[], None]:
+        """Subscribe to changes of one data key (and to availability changes)."""
+        listeners = self._listeners.setdefault(key, [])
+        listeners.append(callback)
 
-        def unsubscribe():
-            if callback in self._callbacks:
-                self._callbacks.remove(callback)
+        def unsubscribe() -> None:
+            with suppress(ValueError):
+                listeners.remove(callback)
 
         return unsubscribe
 
-    def _notify_callbacks(self) -> None:
-        """Notify all callbacks of data update."""
-        for callback in self._callbacks:
-            callback()
+    def set_local_value(self, key: str, value: Any) -> None:
+        """Set a value locally (applied to the module by 'Apply configuration')."""
+        self._update({key: value})
 
-    def _reset_disconnect_timer(self):
-        """Reset disconnect timer."""
-        if self._disconnect_timer:
-            self._disconnect_timer.cancel()
-        self._expected_disconnect = False
-        self._disconnect_timer = self.loop.call_later(
-            DISCONNECT_DELAY, self._disconnect_from_timer
-        )
-
-    def _disconnect_from_timer(self):
-        """Disconnect from device."""
-        if self._operation_lock.locked():
-            self._reset_disconnect_timer()
+    def _update(self, values: dict[str, Any]) -> None:
+        """Store values and notify listeners of the keys that changed."""
+        data = self._data
+        changed = [
+            key for key, value in values.items() if data.get(key, _MISSING) != value
+        ]
+        if not changed:
             return
-        if self._disconnect_timer:
-            self._disconnect_timer.cancel()
-            self._disconnect_timer = None
-        asyncio.create_task(self._execute_disconnect())
+        for key in changed:
+            data[key] = values[key]
+        listeners = self._listeners
+        for key in changed:
+            for callback in listeners.get(key, ()):
+                callback()
 
-    async def _ensure_connected(self) -> None:
-        """Ensure connection to device is established."""
-        if self._client and self._client.is_connected:
-            self._reset_disconnect_timer()
-            return
+    def _notify_all(self) -> None:
+        """Notify every listener (availability changed)."""
+        for listeners in self._listeners.values():
+            for callback in listeners:
+                callback()
 
-        async with self._lock:
-            if self._client and self._client.is_connected:
-                self._reset_disconnect_timer()
+    # ------------------------------------------------------------- connection
+
+    async def connect(self) -> None:
+        """Connect, subscribe to notifications and read initial info."""
+        async with self._connect_lock:
+            if self.is_connected:
                 return
-
-            _LOGGER.info("[%s] Connecting to HLK-2412...", self.ble_device.address)
+            _LOGGER.debug("[%s] Connecting", self.address)
+            self._rx_buffer.clear()
+            client: BleakClientWithServiceCache | None = None
             try:
-                client: BleakClientWithServiceCache = await establish_connection(
-                    BleakClientWithServiceCache,
-                    self.ble_device,
-                    f"HLK-2412 ({self.ble_device.address})",
-                    self._on_disconnect,
-                    use_services_cache=True,
-                    ble_device_callback=lambda: self.ble_device,
-                )
-                self._client = client
-                _LOGGER.info("Starting notifications on %s", CHARACTERISTIC_NOTIFY)
-                await client.start_notify(
-                    CHARACTERISTIC_NOTIFY, self._notification_handler
-                )
-                _LOGGER.info("Notifications started successfully")
-                self._reset_disconnect_timer()
-                _LOGGER.info("[%s] Connected to HLK-2412", self.ble_device.address)
-
-                await self._on_connect()
-            except Exception as ex:
-                _LOGGER.error("[%s] Failed to connect: %s", self.ble_device.address, ex)
+                async with asyncio.timeout(CONNECT_TIMEOUT):
+                    client = await establish_connection(
+                        BleakClientWithServiceCache,
+                        self.ble_device,
+                        f"HLK-2412 ({self.address})",
+                        self._on_disconnect,
+                        max_attempts=self._max_attempts,
+                        use_services_cache=True,
+                        ble_device_callback=lambda: self.ble_device,
+                    )
+                    # Set before start_notify so the very first frames are accepted
+                    # and a drop during start_notify is reported.
+                    self._client = client
+                    self._disconnected.clear()
+                    await client.start_notify(
+                        CHARACTERISTIC_NOTIFY, self._notification_handler
+                    )
+            except BaseException:
                 self._client = None
+                self._disconnected.set()
+                if client is not None:
+                    await self._safe_disconnect(client)
                 raise
 
-    async def _on_connect(self) -> None:
-        """Run after connection to initialize device."""
-        _LOGGER.info("[%s] Connected, listening for data frames...", self.ble_device.address)
-        await asyncio.sleep(0.5)
-        
-        # Read firmware and configuration once on first connect
+            self._expected_disconnect = False
+            self.last_frame_time = time.monotonic()
+            _LOGGER.info("[%s] Connected", self.address)
+
+        self._notify_all()
+
         if "firmware_version" not in self._data:
             try:
-                await self._read_firmware_version()
-            except Exception as ex:
-                _LOGGER.warning("[%s] Failed to read firmware info: %s", self.ble_device.address, ex)
+                await self.read_device_info()
+            except (OperationError, BleakError, TimeoutError) as ex:
+                _LOGGER.warning(
+                    "[%s] Failed to read device info: %s", self.address, ex
+                )
+
+    async def wait_disconnected(self, timeout: float) -> bool:
+        """Wait until the device disconnects; return True if it did."""
+        with suppress(TimeoutError):
+            async with asyncio.timeout(timeout):
+                await self._disconnected.wait()
+        return self._disconnected.is_set()
 
     def _on_disconnect(self, client: BleakClientWithServiceCache) -> None:
         """Handle disconnection."""
+        # establish_connection reports disconnects of its failed attempts too;
+        # only the client we actually use matters.
+        if client is not self._client:
+            return
+        self._client = None
+        self._rx_buffer.clear()
+        self._fail_pending(OperationError("Disconnected"))
+        self._disconnected.set()
         if self._expected_disconnect:
-            _LOGGER.info("[%s] Disconnected", self.ble_device.address)
+            _LOGGER.debug("[%s] Disconnected", self.address)
         else:
-            _LOGGER.warning("[%s] Unexpected disconnection", self.ble_device.address)
-        if self._disconnect_timer:
-            self._disconnect_timer.cancel()
-            self._disconnect_timer = None
-
-    async def _execute_disconnect(self) -> None:
-        """Execute disconnection."""
-        async with self._lock:
-            if self._disconnect_timer:
-                return
-            self._expected_disconnect = True
-            client = self._client
-            self._client = None
-            if client and client.is_connected:
-                try:
-                    await client.disconnect()
-                except Exception as ex:
-                    _LOGGER.warning("Error disconnecting: %s", ex)
+            _LOGGER.warning("[%s] Unexpected disconnection", self.address)
+        self._notify_all()
 
     async def disconnect(self) -> None:
         """Disconnect from the device."""
-        if self._disconnect_timer:
-            self._disconnect_timer.cancel()
-            self._disconnect_timer = None
-        await self._execute_disconnect()
+        if self._calibration_poll_task:
+            self._calibration_poll_task.cancel()
+        self._expected_disconnect = True
+        client = self._client
+        self._client = None
+        self._fail_pending(OperationError("Disconnected"))
+        self._disconnected.set()
+        if client is not None:
+            await self._safe_disconnect(client)
+            self._notify_all()
 
-    def _notification_handler(self, _sender: int, data: bytearray) -> None:
-        """Handle notification responses."""
-        # _LOGGER.debug("[%s] RX: %s", self.ble_device.address, data.hex())
-        self._reset_disconnect_timer()
+    async def _safe_disconnect(self, client: BleakClientWithServiceCache) -> None:
+        try:
+            async with asyncio.timeout(DISCONNECT_TIMEOUT):
+                await client.disconnect()
+        except Exception as ex:  # noqa: BLE001
+            _LOGGER.debug("[%s] Error disconnecting: %s", self.address, ex)
 
-        if data.startswith(bytearray.fromhex(TX_HEADER)):
-            _LOGGER.debug("[%s] Command ACK detected: %s", self.ble_device.address, data.hex())
-            if self._notify_future and not self._notify_future.done():
-                self._notify_future.set_result(data)
+    # --------------------------------------------------------------- receive
+
+    def _notification_handler(self, _sender: Any, data: bytearray) -> None:
+        """Reassemble frames from (possibly fragmented) notifications."""
+        buf = self._rx_buffer
+        buf += data
+        while True:
+            rx = buf.find(RX_HEADER)
+            tx = buf.find(TX_HEADER)
+            if rx < 0 and tx < 0:
+                # Keep a possible partial header at the end.
+                del buf[: max(0, len(buf) - (HEADER_LEN - 1))]
+                return
+            start = tx if rx < 0 or (0 <= tx < rx) else rx
+            if start:
+                del buf[:start]
+            if len(buf) < HEADER_LEN + 2:
+                return
+            length = int.from_bytes(buf[4:6], "little")
+            if length > MAX_FRAME_PAYLOAD:
+                del buf[:HEADER_LEN]
+                continue
+            end = HEADER_LEN + 2 + length + HEADER_LEN
+            if len(buf) < end:
+                if len(buf) > MAX_BUFFER:
+                    buf.clear()
+                return
+            is_report = buf[:HEADER_LEN] == RX_HEADER
+            footer = buf[end - HEADER_LEN : end]
+            payload = bytes(buf[HEADER_LEN + 2 : end - HEADER_LEN])
+            del buf[:end]
+            if footer != (RX_FOOTER if is_report else TX_FOOTER):
+                _LOGGER.debug("[%s] Dropping frame with bad footer", self.address)
+                continue
+            if is_report:
+                self._handle_report(payload)
             else:
-                _LOGGER.warning("[%s] Received ACK but no future waiting: %s", self.ble_device.address, data.hex())
-            return
+                self._handle_ack(payload)
 
-        if data.startswith(bytearray.fromhex(RX_HEADER)):
-            # _LOGGER.debug("[%s] Data frame detected", self.ble_device.address)
-            payload = _unwrap_frame(data, RX_HEADER, RX_FOOTER)
-            try:
-                parsed = self._parse_uplink_frame(payload)
-                if parsed:
-                    self._data.update(parsed)
-                    self._last_full_update = time.monotonic()
-                    self._notify_callbacks()
-            except Exception as ex:
-                _LOGGER.debug("[%s] Failed to parse uplink frame: %s", self.ble_device.address, ex)
+    def _handle_ack(self, payload: bytes) -> None:
+        pending = self._pending_ack
+        if pending and payload[:2] == pending[0] and not pending[1].done():
+            pending[1].set_result(payload[2:])
         else:
-            _LOGGER.warning("[%s] Unknown frame header: %s", self.ble_device.address, data[:4].hex() if len(data) >= 4 else data.hex())
+            _LOGGER.debug("[%s] Unsolicited ACK: %s", self.address, payload.hex())
 
-    def _modify_command(self, raw_command: str) -> bytes:
-        """Wrap command in protocol framing."""
-        command_word = raw_command[:4]
-        value = raw_command[4:]
-        command_bytes = int(command_word, 16).to_bytes(2, "little")
-        value_bytes = bytearray.fromhex(value)
-        contents = bytearray(command_bytes + value_bytes)
-        length = len(contents).to_bytes(2, "little")
-        return (
-            bytearray.fromhex(TX_HEADER)
-            + length
-            + contents
-            + bytearray.fromhex(TX_FOOTER)
+    def _handle_report(self, payload: bytes) -> None:
+        self.last_frame_time = now = time.monotonic()
+        try:
+            parsed = self._parse_report(payload, now)
+        except (IndexError, ValueError) as ex:
+            _LOGGER.debug("[%s] Failed to parse report: %s", self.address, ex)
+            return
+        if parsed:
+            self._update(parsed)
+
+    def _parse_report(self, payload: bytes, now: float) -> dict[str, Any] | None:
+        """Parse a report frame payload: type, 0xAA, content..., 0x55, check."""
+        if len(payload) < 11 or payload[1] != 0xAA or payload[-2] != 0x55:
+            _LOGGER.debug("[%s] Invalid report: %s", self.address, payload.hex())
+            return None
+        frame_type = payload[0]
+        if frame_type not in (FRAME_TYPE_BASIC, FRAME_TYPE_ENGINEERING):
+            _LOGGER.debug("[%s] Unknown report type %s", self.address, frame_type)
+            return None
+        engineering = frame_type == FRAME_TYPE_ENGINEERING
+        content = payload[2:-2]
+
+        status = content[0]
+        moving = status in (0x01, 0x03)
+        stationary = status in (0x02, 0x03)
+        result: dict[str, Any] = {
+            "moving": moving,
+            "stationary": stationary,
+            "occupancy": moving or stationary,
+            "engineering_mode": engineering,
+            "data_type": "engineering" if engineering else "basic",
+        }
+
+        # Distances/energies change on almost every frame; throttle them.
+        interval = self._data.get("sensor_update_interval", 1.0)
+        if now - self._last_sensor_update < interval:
+            return result
+        self._last_sensor_update = now
+
+        result["move_distance_cm"] = int.from_bytes(content[1:3], "little")
+        result["move_energy"] = content[3]
+        result["still_distance_cm"] = int.from_bytes(content[4:6], "little")
+        result["still_energy"] = content[6]
+
+        # Engineering: 7 basic + 2 max gates + 14 move + 14 static + light
+        if engineering and len(content) >= 9 + 2 * GATES:
+            gates = content[9 : 9 + 2 * GATES]
+            for i in range(GATES):
+                result[f"move_gate_{i}_energy"] = gates[i]
+                result[f"static_gate_{i}_energy"] = gates[GATES + i]
+            if len(content) > 9 + 2 * GATES:
+                result["light_level"] = content[9 + 2 * GATES]
+        elif not engineering:
+            for key in GATE_ENERGY_KEYS:
+                result[key] = None
+
+        return result
+
+    # -------------------------------------------------------------- commands
+
+    def _fail_pending(self, ex: Exception) -> None:
+        pending = self._pending_ack
+        if pending and not pending[1].done():
+            pending[1].set_exception(ex)
+            # Mark retrieved so an unawaited failure is not logged by asyncio.
+            pending[1].exception()
+
+    async def _command(self, cmd: int, value: bytes = b"") -> bytes:
+        """Send a command, return ACK data after the status word."""
+        client = self._client
+        if client is None or not client.is_connected:
+            raise OperationError("Not connected")
+        contents = cmd.to_bytes(2, "little") + value
+        frame = (
+            TX_HEADER + len(contents).to_bytes(2, "little") + contents + TX_FOOTER
         )
-
-    def _parse_response(self, raw_command: str, data: bytes) -> bytes:
-        """Parse command response."""
-        payload = _unwrap_frame(data, TX_HEADER, TX_FOOTER)
-        if len(payload) < 2:
-            raise OperationError("Response too short")
-        expected_ack = (int(raw_command[:4], 16) | 0x0100).to_bytes(2, "little")
-        command = payload[:2]
-        if command != expected_ack:
-            raise OperationError(
-                f"Unexpected response command {command.hex()} for {raw_command[:4]}"
-            )
-        return payload[2:]
-
-    async def _send_command(
-        self, raw_command: str, wait_for_response: bool = True
-    ) -> bytes | None:
-        """Send command to device and read response."""
-        await self._ensure_connected()
-
-        async with self._operation_lock:
-            command = self._modify_command(raw_command)
-            _LOGGER.debug("[%s] TX command: %s -> %s", self.ble_device.address, raw_command, command.hex())
-
-            if wait_for_response:
-                self._notify_future = self.loop.create_future()
-
-            await self._client.write_gatt_char(
-                CHARACTERISTIC_WRITE, command, False
-            )
-            _LOGGER.debug("[%s] Command written to %s", self.ble_device.address, CHARACTERISTIC_WRITE)
-
-            if not wait_for_response:
-                return None
-
-            try:
-                notify_msg_raw = await asyncio.wait_for(
-                    self._notify_future, timeout=COMMAND_TIMEOUT
-                )
-                _LOGGER.debug("Got response: %s", notify_msg_raw.hex())
-            except asyncio.TimeoutError:
-                _LOGGER.error("[%s] Command timeout for %s after %ds", self.ble_device.address, raw_command, COMMAND_TIMEOUT)
-                raise OperationError("Command timeout")
-            finally:
-                self._notify_future = None
-
-            notify_msg = self._parse_response(raw_command, notify_msg_raw)
-            _LOGGER.debug("Command response: %s", notify_msg.hex())
-            return notify_msg
-
-    async def _read_firmware_version(self) -> None:
-        """Read firmware version and basic configuration from device."""
-        response = await self._send_command(CMD_ENABLE_CFG + "0100")
-        if not response or len(response) < 2:
-            raise OperationError("Failed to enable configuration")
-
+        future: asyncio.Future[bytes] = asyncio.get_running_loop().create_future()
+        self._pending_ack = ((cmd | 0x0100).to_bytes(2, "little"), future)
+        try:
+            await client.write_gatt_char(CHARACTERISTIC_WRITE, frame, False)
+            async with asyncio.timeout(COMMAND_TIMEOUT):
+                response = await future
+        except TimeoutError:
+            raise OperationError(f"Timeout waiting for ACK of 0x{cmd:04x}") from None
+        finally:
+            self._pending_ack = None
+        if len(response) < 2:
+            raise OperationError(f"Short ACK for 0x{cmd:04x}")
         status = int.from_bytes(response[:2], "little")
         if status != 0:
-            raise OperationError(f"Enable config failed with status {status}")
+            raise OperationError(f"Command 0x{cmd:04x} failed with status {status}")
+        return response[2:]
 
-        fw_response = await self._send_command(CMD_READ_FIRMWARE)
-        if fw_response and len(fw_response) >= 2:
-            fw_status = int.from_bytes(fw_response[:2], "little")
-            if fw_status == 0 and len(fw_response) >= 4:
-                fw_type = int.from_bytes(fw_response[2:4], "little")
-                if len(fw_response) >= 10:
-                    # Major version: 2 bytes [patch, major] e.g. [0x10, 0x01] -> V1.10
-                    major_part = fw_response[5]
-                    patch_part = fw_response[4]
-                    # Minor version: 4 bytes reversed e.g. [0x10, 0x18, 0x04, 0x24] -> 24041810
-                    minor_bytes = fw_response[6:10]
-                    minor_str = "".join(f"{b:02x}" for b in reversed(minor_bytes))
-                    self._data["firmware_version"] = f"V{major_part}.{patch_part:02x}.{minor_str}"
-                    self._data["firmware_type"] = fw_type
-                    _LOGGER.info(
-                        "[%s] Firmware: %s (type: 0x%04x)",
-                        self.ble_device.address,
-                        self._data["firmware_version"],
-                        fw_type,
-                    )
+    @asynccontextmanager
+    async def _config_session(self, end: bool = True) -> AsyncIterator[None]:
+        """Run commands inside enable/end config; always leave config mode."""
+        async with self._session_lock:
+            for attempt in range(ENABLE_CFG_ATTEMPTS):
+                try:
+                    await self._command(CMD_ENABLE_CFG, b"\x01\x00")
+                    break
+                except OperationError:
+                    if attempt == ENABLE_CFG_ATTEMPTS - 1 or not self.is_connected:
+                        raise
+                    await asyncio.sleep(0.3)
+            try:
+                yield
+            finally:
+                if end:
+                    try:
+                        await self._command(CMD_END_CFG)
+                    except (OperationError, BleakError) as ex:
+                        _LOGGER.debug("[%s] End config failed: %s", self.address, ex)
 
-        params_response = await self._send_command(CMD_READ_BASIC_PARAMS)
-        if params_response and len(params_response) >= 2:
-            params_status = int.from_bytes(params_response[:2], "little")
-            if params_status == 0 and len(params_response) >= 7:
-                min_gate = params_response[2]
-                max_gate = params_response[3]
-                unmanned_duration = int.from_bytes(params_response[4:6], "little")
-                self._data["min_gate"] = min_gate
-                self._data["max_gate"] = max_gate
-                self._data["unmanned_duration"] = unmanned_duration
-                _LOGGER.debug(
-                    "HLK-2412: Gates %d-%d, Unmanned: %ds",
-                    min_gate,
-                    max_gate,
-                    unmanned_duration,
-                )
+    async def end_config_mode(self) -> None:
+        """Leave config mode (recovery if a previous session got stuck)."""
+        async with self._session_lock:
+            await self._command(CMD_END_CFG)
 
-        # Read motion sensitivity for all gates
-        motion_sens_response = await self._send_command(CMD_READ_MOTION_SENSITIVITY)
-        if motion_sens_response and len(motion_sens_response) >= 2:
-            sens_status = int.from_bytes(motion_sens_response[:2], "little")
-            if sens_status == 0 and len(motion_sens_response) >= 16:
-                for i in range(14):
-                    self._data[f"motion_sensitivity_gate_{i}"] = motion_sens_response[2 + i]
-                _LOGGER.debug("[%s] Motion sensitivity loaded", self.ble_device.address)
+    async def _run(self, name: str, coro_fn: Callable[[], Any]) -> bool:
+        """Run an operation and log failures; return success."""
+        try:
+            await coro_fn()
+        except (OperationError, BleakError, TimeoutError) as ex:
+            _LOGGER.error("[%s] %s failed: %s", self.address, name, ex)
+            return False
+        return True
 
-        # Read motionless sensitivity for all gates
-        motionless_sens_response = await self._send_command(CMD_READ_MOTIONLESS_SENSITIVITY)
-        if motionless_sens_response and len(motionless_sens_response) >= 2:
-            sens_status = int.from_bytes(motionless_sens_response[:2], "little")
-            if sens_status == 0 and len(motionless_sens_response) >= 16:
-                for i in range(14):
-                    self._data[f"motionless_sensitivity_gate_{i}"] = motionless_sens_response[2 + i]
-                _LOGGER.debug("[%s] Motionless sensitivity loaded", self.ble_device.address)
+    async def read_device_info(self) -> None:
+        """Read firmware version and configuration from the module."""
+        async with self._config_session():
+            values: dict[str, Any] = {}
+            fw = await self._command(CMD_READ_FIRMWARE)
+            if len(fw) >= 8:
+                fw_type = int.from_bytes(fw[0:2], "little")
+                minor = "".join(f"{b:02x}" for b in reversed(fw[4:8]))
+                values["firmware_version"] = f"V{fw[3]}.{fw[2]:02x}.{minor}"
+                values["firmware_type"] = fw_type
 
-        response = await self._send_command(CMD_END_CFG)
-        if not response or len(response) < 2:
-            raise OperationError("Failed to end configuration")
+            params = await self._command(CMD_READ_BASIC_PARAMS)
+            if len(params) >= 4:
+                values["min_gate"] = params[0]
+                values["max_gate"] = params[1]
+                values["unmanned_duration"] = int.from_bytes(params[2:4], "little")
+                if len(params) >= 5:
+                    values["out_pin_polarity"] = params[4]
+
+            for cmd, prefix in (
+                (CMD_READ_MOTION_SENSITIVITY, "motion_sensitivity_gate_"),
+                (CMD_READ_MOTIONLESS_SENSITIVITY, "motionless_sensitivity_gate_"),
+            ):
+                sens = await self._command(cmd)
+                if len(sens) >= GATES:
+                    for i in range(GATES):
+                        values[f"{prefix}{i}"] = sens[i]
+        self._update(values)
+        _LOGGER.info(
+            "[%s] Firmware %s", self.address, values.get("firmware_version")
+        )
 
     async def read_configuration(self) -> dict[str, Any]:
-        """Read full configuration from device (call on demand)."""
-        config = {}
-
-        response = await self._send_command(CMD_ENABLE_CFG + "0100")
-        if not response or len(response) < 2:
-            raise OperationError("Failed to enable configuration")
-
-        status = int.from_bytes(response[:2], "little")
-        if status != 0:
-            raise OperationError(f"Enable config failed with status {status}")
-
-        resolution_response = await self._send_command(CMD_READ_RESOLUTION)
-        if resolution_response and len(resolution_response) >= 3:
-            res_status = int.from_bytes(resolution_response[:2], "little")
-            if res_status == 0:
-                config["resolution"] = resolution_response[2]
-
-        motion_sens_response = await self._send_command(CMD_READ_MOTION_SENSITIVITY)
-        if motion_sens_response and len(motion_sens_response) >= 16:
-            sens_status = int.from_bytes(motion_sens_response[:2], "little")
-            if sens_status == 0:
-                config["motion_sensitivity"] = list(motion_sens_response[2:16])
-
-        motionless_sens_response = await self._send_command(
-            CMD_READ_MOTIONLESS_SENSITIVITY
-        )
-        if motionless_sens_response and len(motionless_sens_response) >= 16:
-            sens_status = int.from_bytes(motionless_sens_response[:2], "little")
-            if sens_status == 0:
-                config["motionless_sensitivity"] = list(motionless_sens_response[2:16])
-
-        mac_response = await self._send_command(CMD_READ_MAC + "0100")
-        if mac_response and len(mac_response) >= 8:
-            mac_status = int.from_bytes(mac_response[:2], "little")
-            if mac_status == 0:
-                mac_bytes = mac_response[2:8]
-                config["mac_address"] = ":".join(f"{b:02X}" for b in mac_bytes)
-
-        response = await self._send_command(CMD_END_CFG)
-
+        """Read resolution and MAC (diagnostics, on demand)."""
+        config: dict[str, Any] = {}
+        async with self._config_session():
+            resolution = await self._command(CMD_READ_RESOLUTION)
+            if resolution:
+                config["resolution"] = resolution[0]
+            mac = await self._command(CMD_READ_MAC, b"\x01\x00")
+            if len(mac) >= 6:
+                config["mac_address"] = ":".join(f"{b:02X}" for b in mac[:6])
         return config
+
+    async def _set_engineering(self, enable: bool) -> None:
+        async with self._config_session():
+            await self._command(
+                CMD_ENABLE_ENGINEERING if enable else CMD_DISABLE_ENGINEERING
+            )
 
     async def enable_engineering_mode(self) -> bool:
         """Enable engineering mode."""
-        try:
-            await self._ensure_connected()
-            
-            # Retry enable config command - device may be busy streaming data
-            response = None
-            for attempt in range(3):
-                try:
-                    response = await self._send_command(CMD_ENABLE_CFG + "0100")
-                    if response and len(response) >= 2:
-                        break
-                    _LOGGER.warning("[%s] Enable config attempt %d failed, retrying...", self.ble_device.address, attempt + 1)
-                    await asyncio.sleep(0.5)
-                except OperationError:
-                    if attempt < 2:
-                        _LOGGER.warning("[%s] Enable config timeout, attempt %d/3", self.ble_device.address, attempt + 1)
-                        await asyncio.sleep(0.5)
-                    else:
-                        raise
-            
-            if not response or len(response) < 2:
-                raise OperationError("Failed to enable configuration after retries")
-            
-            status = int.from_bytes(response[:2], "little")
-            if status != 0:
-                raise OperationError(f"Enable config failed with status {status}")
-            
-            response = await self._send_command(CMD_ENABLE_ENGINEERING)
-            if not response or len(response) < 2:
-                raise OperationError("Failed to enable engineering mode")
-            
-            status = int.from_bytes(response[:2], "little")
-            if status != 0:
-                _LOGGER.error("[%s] Enable engineering mode failed with status %d", self.ble_device.address, status)
-                await self._send_command(CMD_END_CFG)
-                return False
-            
-            await self._send_command(CMD_END_CFG)
-            _LOGGER.info("[%s] Engineering mode enabled", self.ble_device.address)
-            return True
-        except Exception as ex:
-            _LOGGER.error("[%s] Failed to enable engineering mode: %s", self.ble_device.address, ex)
-            return False
+        return await self._run(
+            "Enable engineering mode", lambda: self._set_engineering(True)
+        )
 
     async def disable_engineering_mode(self) -> bool:
         """Disable engineering mode."""
-        try:
-            await self._ensure_connected()
-            
-            # Retry enable config command - device may be busy streaming data
-            response = None
-            for attempt in range(3):
-                try:
-                    response = await self._send_command(CMD_ENABLE_CFG + "0100")
-                    if response and len(response) >= 2:
-                        break
-                    _LOGGER.warning("[%s] Enable config attempt %d failed, retrying...", self.ble_device.address, attempt + 1)
-                    await asyncio.sleep(0.5)
-                except OperationError:
-                    if attempt < 2:
-                        _LOGGER.warning("[%s] Enable config timeout, attempt %d/3", self.ble_device.address, attempt + 1)
-                        await asyncio.sleep(0.5)
-                    else:
-                        raise
-            
-            if not response or len(response) < 2:
-                _LOGGER.error("[%s] Failed to enable configuration after retries", self.ble_device.address)
-                raise OperationError("Failed to enable configuration after retries")
-            
-            status = int.from_bytes(response[:2], "little")
-            if status != 0:
-                _LOGGER.error("[%s] Enable config failed with status %d", self.ble_device.address, status)
-                raise OperationError(f"Enable config failed with status {status}")
-            
-            response = await self._send_command(CMD_DISABLE_ENGINEERING)
-            if not response or len(response) < 2:
-                _LOGGER.error("[%s] Failed to disable engineering mode", self.ble_device.address)
-                raise OperationError("Failed to disable engineering mode")
-            
-            status = int.from_bytes(response[:2], "little")
-            if status != 0:
-                _LOGGER.error("[%s] Disable engineering mode failed with status %d", self.ble_device.address, status)
-                await self._send_command(CMD_END_CFG)
-                return False
-            
-            await self._send_command(CMD_END_CFG)
-            _LOGGER.info("[%s] Engineering mode disabled", self.ble_device.address)
-            return True
-        except Exception as ex:
-            _LOGGER.error("[%s] Failed to disable engineering mode: %s", self.ble_device.address, ex)
-            return False
+        return await self._run(
+            "Disable engineering mode", lambda: self._set_engineering(False)
+        )
 
     async def query_calibration_status(self) -> bool:
-        """Query if calibration is currently running."""
-        try:
-            await self._ensure_connected()
-            
-            response = await self._send_command(CMD_QUERY_CALIBRATION)
-            if not response or len(response) < 2:
-                return False
-            
-            status = int.from_bytes(response[:2], "little")
-            if status != 0:
-                return False
-            
-            # Check status value: 0x0001 = executing, 0x0000 = not executing
-            if len(response) >= 4:
-                calibration_status = int.from_bytes(response[2:4], "little")
-                is_calibrating = calibration_status == 0x0001
-                self._data["calibration_active"] = is_calibrating
-                self._notify_callbacks()
-                return is_calibrating
-            
-            return False
-        except Exception as ex:
-            _LOGGER.debug("[%s] Failed to query calibration status: %s", self.ble_device.address, ex)
-            return False
+        """Query if background calibration is running."""
+        async with self._config_session():
+            response = await self._command(CMD_QUERY_CALIBRATION)
+        active = len(response) >= 2 and int.from_bytes(response[:2], "little") == 1
+        self._update({"calibration_active": active})
+        return active
 
     async def _poll_calibration_status(self) -> None:
-        """Poll calibration status every 2 seconds until it's done."""
+        """Poll calibration status until it finishes (max ~30 s)."""
         try:
-            for _ in range(15):  # Poll for max 30 seconds
+            for _ in range(15):
                 await asyncio.sleep(2)
-                is_active = await self.query_calibration_status()
-                if not is_active:
-                    _LOGGER.info("[%s] Calibration completed", self.ble_device.address)
-                    break
-        except asyncio.CancelledError:
-            _LOGGER.debug("[%s] Calibration polling cancelled", self.ble_device.address)
-        except Exception as ex:
-            _LOGGER.warning("[%s] Error polling calibration status: %s", self.ble_device.address, ex)
+                try:
+                    if not await self.query_calibration_status():
+                        _LOGGER.info("[%s] Calibration completed", self.address)
+                        break
+                except (OperationError, BleakError, TimeoutError) as ex:
+                    _LOGGER.debug("[%s] Calibration query failed: %s", self.address, ex)
         finally:
             self._calibration_poll_task = None
-            self._data["calibration_active"] = False
-            self._notify_callbacks()
+            self._update({"calibration_active": False})
 
     async def start_calibration(self) -> bool:
-        """Start dynamic background correction mode."""
-        try:
-            await self._ensure_connected()
-            
-            response = await self._send_command(CMD_START_CALIBRATION)
-            if not response or len(response) < 2:
-                raise OperationError("Failed to start calibration")
-            
-            status = int.from_bytes(response[:2], "little")
-            if status != 0:
-                _LOGGER.error("[%s] Start calibration failed with status %d", self.ble_device.address, status)
-                return False
-            
-            _LOGGER.info("[%s] Calibration started, will complete in ~10 seconds", self.ble_device.address)
-            
-            # Start polling calibration status
-            self._data["calibration_active"] = True
-            self._notify_callbacks()
-            
-            if self._calibration_poll_task:
-                self._calibration_poll_task.cancel()
-            
-            self._calibration_poll_task = asyncio.create_task(self._poll_calibration_status())
-            
-            return True
-        except Exception as ex:
-            _LOGGER.error("[%s] Failed to start calibration: %s", self.ble_device.address, ex)
-            return False
+        """Start dynamic background correction."""
 
-    async def factory_reset(self) -> bool:
-        """Restore factory settings and restart module."""
-        try:
-            await self._ensure_connected()
-            
-            # Enable config mode
-            response = await self._send_command(CMD_ENABLE_CFG + "0100")
-            if not response or len(response) < 2:
-                raise OperationError("Failed to enable configuration")
-            
-            status = int.from_bytes(response[:2], "little")
-            if status != 0:
-                raise OperationError(f"Enable config failed with status {status}")
-            
-            # Send factory reset command
-            response = await self._send_command(CMD_FACTORY_RESET)
-            if not response or len(response) < 2:
-                await self._send_command(CMD_END_CFG)
-                raise OperationError("Failed to factory reset")
-            
-            status = int.from_bytes(response[:2], "little")
-            if status != 0:
-                _LOGGER.error("[%s] Factory reset failed with status %d", self.ble_device.address, status)
-                await self._send_command(CMD_END_CFG)
-                return False
-            
-            await self._send_command(CMD_END_CFG)
-            _LOGGER.info("[%s] Factory reset successful, module will restart automatically", self.ble_device.address)
-            
-            # Module restarts automatically after factory reset
-            # Wait for module to restart and reconnect (takes ~5-10 seconds)
-            _LOGGER.info("[%s] Waiting 10 seconds for module to restart...", self.ble_device.address)
-            await asyncio.sleep(10)
+        async def _start() -> None:
+            async with self._config_session():
+                await self._command(CMD_START_CALIBRATION)
 
-            await self.restart_module()
-            await asyncio.sleep(10)
-            # Reload configuration from device after restart
-            try:
-                await self._read_firmware_version()
-                _LOGGER.info("[%s] Configuration reloaded after factory reset", self.ble_device.address)
-            except Exception as ex:
-                _LOGGER.warning("[%s] Failed to reload config after reset: %s", self.ble_device.address, ex)
-            
-            return True
-        except Exception as ex:
-            _LOGGER.error("[%s] Failed to factory reset: %s", self.ble_device.address, ex)
+        if not await self._run("Start calibration", _start):
             return False
+        _LOGGER.info("[%s] Calibration started", self.address)
+        self._update({"calibration_active": True})
+        if self._calibration_poll_task:
+            self._calibration_poll_task.cancel()
+        self._calibration_poll_task = asyncio.create_task(
+            self._poll_calibration_status()
+        )
+        return True
+
+    async def _restart(self) -> None:
+        # Restart leaves config mode by itself; the module drops the BLE link.
+        async with self._config_session(end=False):
+            await self._command(CMD_RESTART_MODULE)
 
     async def restart_module(self) -> bool:
         """Restart the module."""
-        try:
-            await self._ensure_connected()
-            
-            response = await self._send_command(CMD_RESTART_MODULE)
-            if not response or len(response) < 2:
-                raise OperationError("Failed to restart module")
-            
-            status = int.from_bytes(response[:2], "little")
-            if status != 0:
-                _LOGGER.error("[%s] Restart module failed with status %d", self.ble_device.address, status)
-                return False
-            
-            _LOGGER.info("[%s] Module restart initiated", self.ble_device.address)
-            return True
-        except Exception as ex:
-            _LOGGER.error("[%s] Failed to restart module: %s", self.ble_device.address, ex)
-            return False
+        return await self._run("Restart module", self._restart)
+
+    async def factory_reset(self) -> bool:
+        """Restore factory settings and restart module."""
+
+        async def _reset() -> None:
+            async with self._config_session():
+                await self._command(CMD_FACTORY_RESET)
+            for key in CONFIG_KEYS:
+                self._data.pop(key, None)
+            await self._restart()
+
+        # Config is read again automatically after reconnect.
+        return await self._run("Factory reset", _reset)
 
     async def write_basic_params(
         self, min_gate: int, max_gate: int, unmanned_duration: int, out_pin_polarity: int
     ) -> bool:
         """Write basic parameters to device."""
-        try:
-            await self._ensure_connected()
-            
-            # Build command value: 1 byte min + 1 byte max + 2 bytes duration + 1 byte polarity
-            value_bytes = bytes([
-                min_gate,
-                max_gate,
-            ]) + unmanned_duration.to_bytes(2, "little") + bytes([out_pin_polarity])
-            value_hex = value_bytes.hex()
-            
-            response = await self._send_command(CMD_ENABLE_CFG + "0100")
-            if not response or len(response) < 2:
-                raise OperationError("Failed to enable configuration")
-            
-            status = int.from_bytes(response[:2], "little")
-            if status != 0:
-                raise OperationError(f"Enable config failed with status {status}")
-            
-            response = await self._send_command(CMD_WRITE_BASIC_PARAMS + value_hex)
-            if not response or len(response) < 2:
-                await self._send_command(CMD_END_CFG)
-                raise OperationError("Failed to write basic parameters")
-            
-            status = int.from_bytes(response[:2], "little")
-            if status != 0:
-                _LOGGER.error("[%s] Write basic params failed with status %d", self.ble_device.address, status)
-                await self._send_command(CMD_END_CFG)
-                return False
-            
-            await self._send_command(CMD_END_CFG)
-            
-            # Update local data
-            self._data["min_gate"] = min_gate
-            self._data["max_gate"] = max_gate
-            self._data["unmanned_duration"] = unmanned_duration
-            self._data["out_pin_polarity"] = out_pin_polarity
-            self._notify_callbacks()
-            
-            _LOGGER.info(
-                "[%s] Basic params updated: gates %d-%d, unmanned %ds, polarity %d",
-                self.ble_device.address,
-                min_gate,
-                max_gate,
-                unmanned_duration,
-                out_pin_polarity,
-            )
-            return True
-        except Exception as ex:
-            _LOGGER.error("[%s] Failed to write basic params: %s", self.ble_device.address, ex)
-            return False
+        value = (
+            bytes([min_gate, max_gate])
+            + unmanned_duration.to_bytes(2, "little")
+            + bytes([out_pin_polarity])
+        )
+
+        async def _write() -> None:
+            async with self._config_session():
+                await self._command(CMD_WRITE_BASIC_PARAMS, value)
+
+        return await self._run("Write basic params", _write)
+
+    async def _write_sensitivity(self, cmd: int, sensitivities: list[int]) -> None:
+        if len(sensitivities) != GATES:
+            raise OperationError(f"Sensitivity must have exactly {GATES} values")
+        async with self._config_session():
+            await self._command(cmd, bytes(sensitivities))
 
     async def write_motion_sensitivity(self, sensitivities: list[int]) -> bool:
         """Write motion sensitivity for all 14 gates."""
-        try:
-            await self._ensure_connected()
-            
-            if len(sensitivities) != 14:
-                raise OperationError("Motion sensitivity must have exactly 14 values")
-            
-            # Build command value: 14 bytes, one for each gate
-            value_hex = "".join(f"{s:02x}" for s in sensitivities)
-            
-            response = await self._send_command(CMD_ENABLE_CFG + "0100")
-            if not response or len(response) < 2:
-                raise OperationError("Failed to enable configuration")
-            
-            status = int.from_bytes(response[:2], "little")
-            if status != 0:
-                raise OperationError(f"Enable config failed with status {status}")
-            
-            response = await self._send_command(CMD_WRITE_MOTION_SENSITIVITY + value_hex)
-            if not response or len(response) < 2:
-                await self._send_command(CMD_END_CFG)
-                raise OperationError("Failed to write motion sensitivity")
-            
-            status = int.from_bytes(response[:2], "little")
-            if status != 0:
-                _LOGGER.error("[%s] Write motion sensitivity failed with status %d", self.ble_device.address, status)
-                await self._send_command(CMD_END_CFG)
-                return False
-            
-            await self._send_command(CMD_END_CFG)
-            
-            # Update local data
-            for i, sens in enumerate(sensitivities):
-                self._data[f"motion_sensitivity_gate_{i}"] = sens
-            self._notify_callbacks()
-            
-            _LOGGER.info("[%s] Motion sensitivity updated for all gates", self.ble_device.address)
-            return True
-        except Exception as ex:
-            _LOGGER.error("[%s] Failed to write motion sensitivity: %s", self.ble_device.address, ex)
-            return False
+        return await self._run(
+            "Write motion sensitivity",
+            lambda: self._write_sensitivity(
+                CMD_WRITE_MOTION_SENSITIVITY, sensitivities
+            ),
+        )
 
     async def write_motionless_sensitivity(self, sensitivities: list[int]) -> bool:
         """Write motionless sensitivity for all 14 gates."""
-        try:
-            await self._ensure_connected()
-            
-            if len(sensitivities) != 14:
-                raise OperationError("Motionless sensitivity must have exactly 14 values")
-            
-            # Build command value: 14 bytes, one for each gate
-            value_hex = "".join(f"{s:02x}" for s in sensitivities)
-            
-            response = await self._send_command(CMD_ENABLE_CFG + "0100")
-            if not response or len(response) < 2:
-                raise OperationError("Failed to enable configuration")
-            
-            status = int.from_bytes(response[:2], "little")
-            if status != 0:
-                raise OperationError(f"Enable config failed with status {status}")
-            
-            response = await self._send_command(CMD_WRITE_MOTIONLESS_SENSITIVITY + value_hex)
-            if not response or len(response) < 2:
-                await self._send_command(CMD_END_CFG)
-                raise OperationError("Failed to write motionless sensitivity")
-            
-            status = int.from_bytes(response[:2], "little")
-            if status != 0:
-                _LOGGER.error("[%s] Write motionless sensitivity failed with status %d", self.ble_device.address, status)
-                await self._send_command(CMD_END_CFG)
-                return False
-            
-            await self._send_command(CMD_END_CFG)
-            
-            # Update local data
-            for i, sens in enumerate(sensitivities):
-                self._data[f"motionless_sensitivity_gate_{i}"] = sens
-            self._notify_callbacks()
-            
-            _LOGGER.info("[%s] Motionless sensitivity updated for all gates", self.ble_device.address)
-            return True
-        except Exception as ex:
-            _LOGGER.error("[%s] Failed to write motionless sensitivity: %s", self.ble_device.address, ex)
-            return False
-
-    def _parse_uplink_frame(self, data: bytes) -> dict[str, Any] | None:
-        """Parse uplink data frame from device."""
-        if len(data) < 2 or data[1] != 0xAA:
-            _LOGGER.error("payload too short for 1 basic data %s", self.ble_device.address)
-            return None
-        UPLINK_TYPE_ENGINEERING = "01"  # per-gate energies appended to basic target info (+ light_value, out_state)
-        UPLINK_TYPE_BASIC = "02"  # basic target info only (default).
-        frame_type = data[:1].hex()
-        if frame_type == UPLINK_TYPE_ENGINEERING:
-            ftype = "engineering"
-        elif frame_type == UPLINK_TYPE_BASIC:
-            ftype = "basic"
-        else:
-            _LOGGER.error("unknown frame type %s", frame_type)
-            return None
-
-        # Check for end marker 0x55 (checksum byte after it can be any value)
-        if len(data) < 10 or data[-2] != 0x55:
-            _LOGGER.error("Invalid frame format %s: %s", self.ble_device.address, data.hex())
-            return None
-
-        # Extract content between header (2 bytes) and footer (0x55 + checksum)
-        content = data[2:-2]
-
-        if len(content) < 7:
-            _LOGGER.error("payload too short for 3 basic data %s", self.ble_device.address)
-            return None
-
-        status_raw = content[0]
-        moving = status_raw in (0x01, 0x03)
-        stationary = status_raw in (0x02, 0x03)
-        occupancy = moving or stationary
-
-        # Always update critical realtime data (movement/presence)
-        result = {
-            "moving": moving,
-            "stationary": stationary,
-            "occupancy": occupancy,
-        }
-
-        # Throttle non-critical data updates based on configurable interval
-        current_time = time.monotonic()
-        update_interval = self._data.get("sensor_update_interval", 1.0)
-        should_update_sensors = (current_time - self._last_sensor_update) >= update_interval
-
-        if should_update_sensors:
-            self._last_sensor_update = current_time
-            
-            move_distance_cm = int.from_bytes(content[1:3], "little")
-            move_energy = content[3]
-            still_distance_cm = int.from_bytes(content[4:6], "little")
-            still_energy = content[6]
-
-            result.update({
-                "move_distance_cm": move_distance_cm,
-                "move_energy": move_energy,
-                "still_distance_cm": still_distance_cm,
-                "still_energy": still_energy,
-                "data_type": ftype,
-                "engineering_mode": frame_type == UPLINK_TYPE_ENGINEERING,
-            })
-
-            # Parse gate energies in engineering mode
-            # Structure: 7 basic + 2 max gates + 14 move gates + 14 static gates
-            if frame_type == UPLINK_TYPE_ENGINEERING and len(content) >= 37:
-                # Skip basic 7 bytes and 2 max gate bytes
-                gate_data = content[9:]
-                
-                # 14 movement gate energies
-                if len(gate_data) >= 14:
-                    for i in range(14):
-                        result[f"move_gate_{i}_energy"] = gate_data[i]
-                
-                # 14 static gate energies (after movement gates)
-                if len(gate_data) >= 28:
-                    for i in range(14):
-                        result[f"static_gate_{i}_energy"] = gate_data[14 + i]
-                
-                # Light level (1 byte after gate energies, 0-255)
-                if len(data) >= 39:
-                    result["light_level"] = data[39]
-            else:
-                # In basic mode, set all gate energies to None (unavailable)
-                for i in range(14):
-                    result[f"move_gate_{i}_energy"] = None
-                    result[f"static_gate_{i}_energy"] = None
-
-        return result
-
-    async def update(self) -> None:
-        """Update device data."""
-        if not self.is_connected:
-            await self._ensure_connected()
+        return await self._run(
+            "Write motionless sensitivity",
+            lambda: self._write_sensitivity(
+                CMD_WRITE_MOTIONLESS_SENSITIVITY, sensitivities
+            ),
+        )

@@ -59,5 +59,4 @@ class HLK2412Select(HLK2412Entity, SelectEntity):
     async def async_select_option(self, option: str) -> None:
         """Update the option."""
         polarity = 0 if option == "High when occupied" else 1
-        self.coordinator.device._data[self.entity_description.key] = polarity
-        self.coordinator.device._notify_callbacks()
+        self.coordinator.device.set_local_value(self.entity_description.key, polarity)

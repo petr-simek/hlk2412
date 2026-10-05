@@ -1,26 +1,45 @@
-"""Data update coordinator for HLK-2412."""
+"""Connection manager for HLK-2412."""
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 import logging
+import time
 from typing import TYPE_CHECKING
 
+from bleak.exc import BleakError
 from bleak_retry_connector import BLEAK_RETRY_EXCEPTIONS
 
 from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 
+from .device import OperationError
+
 if TYPE_CHECKING:
     from bleak.backends.device import BLEDevice
+
     from .device import HLK2412Device
 
 _LOGGER = logging.getLogger(__name__)
 
+MIN_BACKOFF = 2.0
+MAX_BACKOFF = 60.0
+# How often the connected link is checked.
+WATCHDOG_INTERVAL = 5.0
+# No report frame for this long: module is probably stuck in config mode.
+STALE_RECOVER_AFTER = 10.0
+# No report frame for this long: the link is dead even if BLE says connected.
+STALE_RECONNECT_AFTER = 30.0
+# How long to wait for an advertisement when the device is out of range.
+NOT_PRESENT_WAIT = 30.0
+
+CONNECT_ERRORS = (*BLEAK_RETRY_EXCEPTIONS, BleakError, OperationError, TimeoutError)
+
 
 class DataCoordinator:
-    """Class to manage HLK-2412 data updates."""
+    """Keep one HLK-2412 connected and healthy."""
 
     def __init__(
         self,
@@ -30,8 +49,6 @@ class DataCoordinator:
         device: HLK2412Device,
         base_unique_id: str,
         device_name: str,
-        retry_count: int,
-        connect_interval: float = 5.0,
     ) -> None:
         """Initialize the coordinator."""
         self.hass = hass
@@ -40,70 +57,130 @@ class DataCoordinator:
         self.device = device
         self.device_name = device_name
         self.base_unique_id = base_unique_id
-        self.retry_count = retry_count
-        self.connect_interval = connect_interval
-        self._unsub: callable | None = None
-        self._connect_task: asyncio.Task | None = None
+        self._task: asyncio.Task | None = None
+        self._unsub: Callable[[], None] | None = None
+        self._advertised = asyncio.Event()
 
-    def async_start(self) -> callable:
-        """Start the coordinator."""
+    @callback
+    def async_start(self) -> Callable[[], None]:
+        """Start the connection loop."""
 
         @callback
         def _async_update_ble_device(
             service_info: bluetooth.BluetoothServiceInfoBleak,
             change: bluetooth.BluetoothChange,
         ) -> None:
-            """Update BLE device from bluetooth scanner."""
+            """Track the best path (adapter/proxy) to the device."""
             self.ble_device = service_info.device
             self.device.ble_device = service_info.device
+            self._advertised.set()
 
         self._unsub = bluetooth.async_register_callback(
             self.hass,
             _async_update_ble_device,
-            bluetooth.BluetoothCallbackMatcher(address=self.ble_device.address),
-            bluetooth.BluetoothScanningMode.ACTIVE,
+            bluetooth.BluetoothCallbackMatcher(
+                address=self.ble_device.address, connectable=True
+            ),
+            bluetooth.BluetoothScanningMode.PASSIVE,
         )
-
-        self._connect_task = self.hass.async_create_background_task(
-            self._connection_loop(),
-            name=f"hlk2412-{self.ble_device.address}",
+        self._task = self.hass.async_create_background_task(
+            self._run(), name=f"hlk2412-{self.ble_device.address}"
         )
+        return self.async_stop
 
-        def _async_stop() -> None:
-            if self._connect_task:
-                self._connect_task.cancel()
-            if self._unsub:
-                self._unsub()
+    @callback
+    def async_stop(self) -> None:
+        """Stop the connection loop."""
+        if self._unsub:
+            self._unsub()
+            self._unsub = None
+        if self._task:
+            self._task.cancel()
+            self._task = None
 
-        return _async_stop
+    async def _wait_for_advertisement(self) -> None:
+        self._advertised.clear()
+        try:
+            async with asyncio.timeout(NOT_PRESENT_WAIT):
+                await self._advertised.wait()
+        except TimeoutError:
+            pass
 
-    async def _connection_loop(self) -> None:
-        """Keep the device connected with retries."""
-        attempt = 0
-        delay = 1.0
-        max_delay = 10.0
+    async def _run(self) -> None:
+        """Connect, watch the link and reconnect with backoff."""
+        device = self.device
+        address = self.ble_device.address
+        backoff = MIN_BACKOFF
+        failures = 0
 
         while True:
-            try:
-                await self.device.update()
-                attempt = 0
-                delay = 1.0
-            except BLEAK_RETRY_EXCEPTIONS as ex:
-                attempt += 1
-                self.logger.debug("Retryable BLE error: %s", ex)
-            except Exception as ex:  # noqa: BLE001
-                attempt += 1
-                self.logger.warning("Failed to connect to %s: %s", self.device_name, ex)
+            if not device.is_connected:
+                if not bluetooth.async_address_present(
+                    self.hass, address, connectable=True
+                ):
+                    # Don't burn proxy connection slots on a device nobody hears.
+                    await self._wait_for_advertisement()
+                    continue
+                try:
+                    await device.connect()
+                except Exception as ex:  # noqa: BLE001 - the loop must survive
+                    failures += 1
+                    if not isinstance(ex, CONNECT_ERRORS):
+                        self.logger.exception(
+                            "%s: unexpected error while connecting", self.device_name
+                        )
+                    else:
+                        log = (
+                            self.logger.warning if failures == 1 else self.logger.debug
+                        )
+                        log(
+                            "%s: connect failed (%d), retry in %.0fs: %s",
+                            self.device_name,
+                            failures,
+                            backoff,
+                            ex,
+                        )
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, MAX_BACKOFF)
+                    continue
+                if failures > 1:
+                    self.logger.info(
+                        "%s: connected after %d failed attempts",
+                        self.device_name,
+                        failures,
+                    )
+                failures = 0
+                backoff = MIN_BACKOFF
 
-            if attempt >= self.retry_count:
-                attempt = 0
-                delay = 1.0
-                await asyncio.sleep(self.connect_interval)
-            elif attempt > 0:
-                await asyncio.sleep(delay)
-                delay = min(delay * 2, max_delay)
-            else:
-                await asyncio.sleep(self.connect_interval)
+            if await device.wait_disconnected(WATCHDOG_INTERVAL):
+                # Give the module/proxy a moment before reconnecting.
+                await asyncio.sleep(MIN_BACKOFF)
+                continue
+            await self._check_stale()
+
+    async def _check_stale(self) -> None:
+        device = self.device
+        if device.busy or not device.is_connected:
+            return
+        age = time.monotonic() - device.last_frame_time
+        if age < STALE_RECOVER_AFTER:
+            return
+        if age < STALE_RECONNECT_AFTER:
+            self.logger.debug(
+                "%s: no data for %.0fs, leaving config mode", self.device_name, age
+            )
+            try:
+                await device.end_config_mode()
+            except CONNECT_ERRORS as ex:
+                self.logger.debug("%s: end config failed: %s", self.device_name, ex)
+            return
+        self.logger.warning(
+            "%s: no data for %.0fs, reconnecting", self.device_name, age
+        )
+        try:
+            await device.disconnect()
+        except Exception:  # noqa: BLE001
+            self.logger.exception("%s: disconnect failed", self.device_name)
 
 
 type ConfigEntryType = ConfigEntry[DataCoordinator]

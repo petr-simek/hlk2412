@@ -42,11 +42,11 @@ class HLK2412Entity(Entity):
 
     async def async_added_to_hass(self) -> None:
         """Register callbacks."""
+        # Only woken when our own key changes (or availability changes);
+        # report frames arrive several times per second.
         self.async_on_remove(
-            self.coordinator.device.subscribe(self._handle_coordinator_update)
+            self.coordinator.device.subscribe(
+                self.entity_description.key, self.async_write_ha_state
+            )
         )
         await super().async_added_to_hass()
-
-    def _handle_coordinator_update(self) -> None:
-        """Handle data update."""
-        self.async_write_ha_state()
