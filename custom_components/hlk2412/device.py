@@ -207,7 +207,7 @@ class HLK2412Device:
             data[key] = values[key]
         listeners = self._listeners
         for key in changed:
-            for callback in listeners.get(key, ()):
+            for callback in tuple(listeners.get(key, ())):
                 callback()
         if not STATE_KEYS.isdisjoint(changed):
             for callback in tuple(self._state_listeners):
@@ -215,8 +215,8 @@ class HLK2412Device:
 
     def _notify_all(self) -> None:
         """Notify every listener (availability changed)."""
-        for listeners in self._listeners.values():
-            for callback in listeners:
+        for listeners in tuple(self._listeners.values()):
+            for callback in tuple(listeners):
                 callback()
         for callback in tuple(self._state_listeners):
             callback()
@@ -299,6 +299,7 @@ class HLK2412Device:
         """Disconnect from the device."""
         if self._calibration_poll_task:
             self._calibration_poll_task.cancel()
+            self._calibration_poll_task = None
         self._expected_disconnect = True
         client = self._client
         self._client = None
@@ -344,15 +345,21 @@ class HLK2412Device:
                 return
             is_report = buf[:HEADER_LEN] == RX_HEADER
             footer = buf[end - HEADER_LEN : end]
+            if footer != (RX_FOOTER if is_report else TX_FOOTER):
+                # A false header match (or a lost fragment): skip just the
+                # header and resync, so a real frame inside is not swallowed.
+                _LOGGER.debug("[%s] Dropping frame with bad footer", self.address)
+                del buf[:HEADER_LEN]
+                continue
             payload = bytes(buf[HEADER_LEN + 2 : end - HEADER_LEN])
             del buf[:end]
-            if footer != (RX_FOOTER if is_report else TX_FOOTER):
-                _LOGGER.debug("[%s] Dropping frame with bad footer", self.address)
-                continue
-            if is_report:
-                self._handle_report(payload)
-            else:
-                self._handle_ack(payload)
+            try:
+                if is_report:
+                    self._handle_report(payload)
+                else:
+                    self._handle_ack(payload)
+            except Exception:  # noqa: BLE001 - never break the BLE callback
+                _LOGGER.exception("[%s] Error handling frame", self.address)
 
     def _handle_ack(self, payload: bytes) -> None:
         pending = self._pending_ack
@@ -573,6 +580,28 @@ class HLK2412Device:
             values = await self._read_config_values()
         self._update(values)
         _LOGGER.info("[%s] Configuration written", self.address)
+
+    async def apply_config(
+        self,
+        min_gate: int,
+        max_gate: int,
+        unmanned_duration: int,
+        out_pin_polarity: int,
+        motion: list[int],
+        motionless: list[int],
+    ) -> bool:
+        """Write the whole configuration; log failures and return success."""
+        return await self._run(
+            "Apply configuration",
+            lambda: self.write_config(
+                int(min_gate),
+                int(max_gate),
+                int(unmanned_duration),
+                int(out_pin_polarity),
+                [int(v) for v in motion],
+                [int(v) for v in motionless],
+            ),
+        )
 
     async def read_configuration(self) -> dict[str, Any]:
         """Read resolution and MAC (diagnostics, on demand)."""

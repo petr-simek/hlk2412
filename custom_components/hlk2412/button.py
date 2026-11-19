@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from homeassistant.components.button import ButtonEntity, ButtonEntityDescription
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .coordinator import ConfigEntryType, DataCoordinator
+from .device import GATES
 from .entity import HLK2412Entity
 
 BUTTON_TYPES: dict[str, ButtonEntityDescription] = {
@@ -90,17 +91,18 @@ class HLK2412Button(HLK2412Entity, ButtonEntity):
             ok = await device.factory_reset()
         elif key == "apply_config":
             data = device.data
-            ok = await device.write_basic_params(
+            # One config session for everything, then read back what the
+            # module actually stored (previously three separate sessions).
+            ok = await device.apply_config(
                 data.get("min_gate", 1),
                 data.get("max_gate", 13),
                 data.get("unmanned_duration", 5),
                 data.get("out_pin_polarity", 0),
-            )
-            ok &= await device.write_motion_sensitivity(
-                [data.get(f"motion_sensitivity_gate_{i}", 50) for i in range(14)]
-            )
-            ok &= await device.write_motionless_sensitivity(
-                [data.get(f"motionless_sensitivity_gate_{i}", 50) for i in range(14)]
+                [data.get(f"motion_sensitivity_gate_{i}", 50) for i in range(GATES)],
+                [
+                    data.get(f"motionless_sensitivity_gate_{i}", 50)
+                    for i in range(GATES)
+                ],
             )
         else:
             return

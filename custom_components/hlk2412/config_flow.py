@@ -49,7 +49,7 @@ class HLK2412ConfigFlow(ConfigFlow, domain=DOMAIN):
         self._abort_if_unique_id_configured(
             updates={CONF_ADDRESS: discovery_info.address}
         )
-        
+
         self._discovered_device = discovery_info
         return await self.async_step_confirm()
 
@@ -58,7 +58,7 @@ class HLK2412ConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Confirm discovery."""
         assert self._discovered_device is not None
-        
+
         if user_input is not None:
             return self._create_entry_from_device(self._discovered_device)
 
@@ -67,7 +67,7 @@ class HLK2412ConfigFlow(ConfigFlow, domain=DOMAIN):
             "name": f"HLK-2412_{short_address(self._discovered_device.address)}"
         }
         self.context["title_placeholders"] = placeholders
-        
+
         return self.async_show_form(
             step_id="confirm",
             description_placeholders=placeholders,

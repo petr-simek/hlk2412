@@ -375,3 +375,12 @@ The plot shows:
 - **Pink line** - sensitivity threshold for each gate
 - **Green vertical lines** - min/max gate boundaries
 - Interactive graph with zoom and pan capabilities
+## Changelog
+
+### 1.4.0
+- Frame parser resyncs after a corrupted/false frame header instead of dropping the following real frame.
+- Errors in frame handling, the watchdog loop or engineering-mode switching are logged instead of killing the BLE callback/background task.
+- No engineering-mode task is started after the entry is unloaded (card closed late); listener lists are copied before notifying.
+- "Apply configuration" button writes everything in one config session and reads the stored values back.
+- Added `translations/en.json` (config flow texts were not shown for the custom integration), removed invalid `icons.json`, `EntityCategory` imported from `homeassistant.const`.
+- Entity unique IDs and config entry data are unchanged.

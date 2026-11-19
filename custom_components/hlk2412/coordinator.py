@@ -77,6 +77,7 @@ class DataCoordinator:
         # The user switched it off while watching; respected until all viewers leave.
         self._user_disabled = False
         self._engineering_task: asyncio.Task | None = None
+        self._stopped = False
 
     @callback
     def async_start(self) -> Callable[[], None]:
@@ -108,6 +109,7 @@ class DataCoordinator:
     @callback
     def async_stop(self) -> None:
         """Stop the connection loop."""
+        self._stopped = True
         if self._unsub:
             self._unsub()
             self._unsub = None
@@ -144,6 +146,9 @@ class DataCoordinator:
 
     @callback
     def _schedule_engineering(self) -> None:
+        if self._stopped:
+            # A card may close after the entry was unloaded.
+            return
         if self._engineering_task:
             self._engineering_task.cancel()
         self._engineering_task = self.hass.async_create_background_task(
@@ -172,6 +177,11 @@ class DataCoordinator:
         except CONNECT_ERRORS as ex:
             self.logger.debug(
                 "%s: switching engineering mode failed: %s", self.device_name, ex
+            )
+            return
+        except Exception:  # noqa: BLE001 - background task, log and move on
+            self.logger.exception(
+                "%s: unexpected error switching engineering mode", self.device_name
             )
             return
         self.logger.debug(
@@ -242,9 +252,12 @@ class DataCoordinator:
                 # Give the module/proxy a moment before reconnecting.
                 await asyncio.sleep(MIN_BACKOFF)
                 continue
-            await self._check_stale()
-            self._update_connection_path()
-            await self._retry_device_info()
+            try:
+                await self._check_stale()
+                self._update_connection_path()
+                await self._retry_device_info()
+            except Exception:  # noqa: BLE001 - the loop must survive
+                self.logger.exception("%s: watchdog error", self.device_name)
 
     def _update_connection_path(self) -> None:
         """Publish which adapter/proxy carries the connection and its RSSI."""
