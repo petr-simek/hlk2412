@@ -27,7 +27,11 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 MIN_BACKOFF = 2.0
-MAX_BACKOFF = 60.0
+MAX_BACKOFF = 300.0
+# A link that drops sooner than this after connecting counts as a failed attempt,
+# so a flapping radar (weak signal through a proxy) backs off instead of retrying
+# every few seconds and flooding the proxy with connection attempts.
+STABLE_LINK_AFTER = 120.0
 # How often the connected link is checked.
 WATCHDOG_INTERVAL = 5.0
 # No report frame for this long: module is probably stuck in config mode.
@@ -205,6 +209,7 @@ class DataCoordinator:
         address = self.ble_device.address
         backoff = MIN_BACKOFF
         failures = 0
+        connected_at: float | None = None
 
         while True:
             if not device.is_connected:
@@ -242,15 +247,39 @@ class DataCoordinator:
                         self.device_name,
                         failures,
                     )
-                failures = 0
-                backoff = MIN_BACKOFF
-                self._last_info_attempt = time.monotonic()
+                connected_at = time.monotonic()
+                self._last_info_attempt = connected_at
                 self._update_connection_path()
                 self._schedule_engineering()
 
+            if (
+                failures
+                and connected_at is not None
+                and time.monotonic() - connected_at >= STABLE_LINK_AFTER
+            ):
+                # The link has been stable long enough: forget earlier failures.
+                failures = 0
+                backoff = MIN_BACKOFF
             if await device.wait_disconnected(WATCHDOG_INTERVAL):
-                # Give the module/proxy a moment before reconnecting.
-                await asyncio.sleep(MIN_BACKOFF)
+                lived = time.monotonic() - (connected_at or 0.0)
+                connected_at = None
+                if lived < STABLE_LINK_AFTER:
+                    # Flapping link: treat it like a failed connect and back off.
+                    failures += 1
+                    log = self.logger.warning if failures == 1 else self.logger.debug
+                    log(
+                        "%s: link dropped after %.0fs, reconnect in %.0fs",
+                        self.device_name,
+                        lived,
+                        backoff,
+                    )
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, MAX_BACKOFF)
+                else:
+                    failures = 0
+                    backoff = MIN_BACKOFF
+                    # Give the module/proxy a moment before reconnecting.
+                    await asyncio.sleep(MIN_BACKOFF)
                 continue
             try:
                 await self._check_stale()

@@ -377,6 +377,9 @@ The plot shows:
 - Interactive graph with zoom and pan capabilities
 ## Changelog
 
+### 1.4.1
+- Reconnect backoff also for flapping links: a link that drops within 120 s counts as a failed attempt; backoff grows to 5 min (was 60 s). Stops a weak radar from hammering a Bluetooth proxy every few seconds.
+
 ### 1.4.0
 - Frame parser resyncs after a corrupted/false frame header instead of dropping the following real frame.
 - Errors in frame handling, the watchdog loop or engineering-mode switching are logged instead of killing the BLE callback/background task.
